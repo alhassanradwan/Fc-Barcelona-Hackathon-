@@ -1,0 +1,6 @@
+# What starter/possession_model.py and starter/train_possession_model.py need, pinned so that the
+# trained model and the file it writes can be reproduced. Trained and tested under Python 3.11.
+numpy==2.4.6
+pandas==3.1.1
+scipy==1.17.1
+lightgbm==4.7.0
