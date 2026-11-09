@@ -6,19 +6,25 @@
     python starter/train_possession_model.py final      # train on all four, save to models/
     python starter/train_possession_model.py test       # score on the three held-back matches
 
+    python starter/train_possession_model.py features --all    # then cv, costs and final --all
+
 None of the competition's data is read here. Training uses IDSSE matches only, as described in
 test_on_other_matches.py, so the only labels the model has seen are from other games (RULES.md).
 
 The split is by match. Frames from one match are so alike that a random split would report a score
 far above what the model can really do. J03WN1, J03WOY and J03WR9 are never used for training or for
-choosing anything in this file.
+choosing anything in this file, except with --all.
+
+--all makes the model to submit, once 'test' has shown the method works: the same stages on all
+seven matches, each left out in turn to choose the rounds and costs, with its files kept apart.
 
 Why every copy is damaged differently
 -------------------------------------
-The real tracking has errors nobody has measured here, so a model trained on one fixed kind of damage
-could learn that damage rather than football. Each training copy draws its own damage from
-DAMAGE_RANGES, wide on purpose, so the model cannot lean on any one pattern, such as a missing ball
-always meaning a stoppage. The 'test' stage also scores kinds of damage outside the training mix.
+The damage copies what measure_tracking.py measured on the ATD, but that is one match, and some
+errors it cannot measure at all, so a model trained on one fixed kind of damage could learn that
+damage rather than football. Each training copy draws its own damage from ranges around the measured
+settings, so the model cannot lean on any one pattern, such as a missing ball always meaning a
+stoppage. The 'test' stage also scores kinds of damage outside the training mix.
 """
 
 import argparse
@@ -43,8 +49,10 @@ import test_on_other_matches as other  # noqa: E402
 # Params
 TUNING = ("J03WMX", "J03WOH", "J03WPY", "J03WQQ")
 HELD_BACK = ("J03WN1", "J03WOY", "J03WR9")
+TRAIN = TUNING  # all seven with --all
 STEMS = {stem[-6:]: stem for stem in other.MATCHES}
 WORK_DIR = os.path.join(other.DATA_DIR, "model_work")
+WORK_DIR_ALL = os.path.join(other.DATA_DIR, "model_work_all")
 
 COPIES_PER_MATCH = 3
 EVERY_NTH_FRAME = 5  # neighbouring frames say almost the same thing
@@ -52,14 +60,24 @@ TRAINING_SEED = 40
 CHECK_SEEDS = (11, 12)  # default damage, for comparing with possession_v2 when choosing costs
 N_PROCESSES = 8
 
-# (name in test_on_other_matches, lowest, highest), drawn afresh for every training copy.
-DAMAGE_RANGES = (("BALL_MISSING", 0.30, 0.50), ("BALL_MISSING_DEAD", 0.55, 0.90),
-                 ("BALL_GAP_LIVE_S", 1.0, 3.0), ("BALL_GAP_DEAD_S", 5.0, 20.0),
-                 ("BALL_EDGE_BLUR_S", 1.0, 6.0), ("BALL_NOISE_M", 0.2, 0.8),
-                 ("PLAYER_NOISE_M", 0.1, 0.5), ("SPEED_NOISE_MS", 0.1, 0.6),
-                 ("BALL_DRIFT_M", 0.2, 1.0), ("PLAYER_DRIFT_M", 0.1, 0.6),
-                 ("CAMERA_HEIGHT_M", 20.0, 45.0), ("WRONG_TEAM", 0.0, 0.08),
-                 ("FALSE_BALL_RATE", 0.0, 0.005), ("PLAYER_MISSING", 0.03, 0.12))
+# Drawn afresh for every training copy. (name in test_on_other_matches, lowest, highest) as
+# multiples of the measured setting there, then as plain values.
+DAMAGE_SCALES = (("LOSS_RATE", 0.6, 1.6), ("LOSS_DEAD", 0.6, 1.6), ("FIND_RATE", 0.6, 1.6),
+                 ("FIND_DEAD", 0.6, 1.6), ("GLITCH_RATE", 0.5, 2.0), ("BALL_DRIFT_M", 0.5, 1.5),
+                 ("BALL_SMOOTH_FRAMES", 0.5, 1.5), ("PLAYER_SMOOTH_FRAMES", 0.5, 1.5),
+                 ("SPEED_NOISE_MS", 0.5, 2.0), ("CAMERA_HEIGHT_M", 0.7, 1.5),
+                 ("PLAYER_LOSS_RATE", 0.6, 1.6), ("GROUP_LOSS", 0.5, 1.5), ("GHOST_RATE", 0.0, 2.0),
+                 ("BALL_EDGE_BLUR_S", 0.33, 2.0), ("OUTSIDE_M", 0.5, 2.0))
+DAMAGE_VALUES = (("FILL_S", 3.0, 6.0), ("FILL_TRUE", 0.0, 0.6), ("WRONG_TEAM", 0.0, 0.08),
+                 ("BALL_NOISE_M", 0.0, 0.03), ("PLAYER_NOISE_M", 0.0, 0.03),
+                 ("PLAYER_DRIFT_M", 0.0, 0.3), ("FALSE_BALL_RATE", 0.0, 0.001))
+# How much the ball's situation changes the chance of losing or finding it, as a power of the
+# measured factors: 1 as measured, below 1 weaker, above stronger. The ATD's camera stands on one
+# side, so which side of the pitch loses the ball more is swapped on half the copies.
+SITUATION_FACTORS = ("LOSS_BY_SPEED", "FIND_BY_SPEED", "LOSS_ACROSS", "LOSS_ALONG", "LOSS_IN_CROWD",
+                     "LOSS_IN_BOX")
+SITUATION_POWER = (0.6, 1.4)
+SIDED = ("LOSS_ACROSS", "LOSS_ALONG")
 
 LIGHTGBM = {"objective": "multiclass", "num_class": 3, "metric": "multi_logloss",
             "learning_rate": 0.05, "num_leaves": 63, "min_data_in_leaf": 500,
@@ -84,11 +102,23 @@ def as_arrays(match):
 
 
 def randomised_damage(match, seed):
-    """test_on_other_matches.damage with its settings drawn from DAMAGE_RANGES."""
+    """test_on_other_matches.damage with its settings drawn from DAMAGE_SCALES, DAMAGE_VALUES and
+    SITUATION_POWER."""
     rng = np.random.RandomState(seed)
-    keep = {name: getattr(other, name) for name, _, _ in DAMAGE_RANGES}
-    for name, low, high in DAMAGE_RANGES:
+    names = ([name for name, _, _ in DAMAGE_SCALES + DAMAGE_VALUES]
+             + [name for name in SITUATION_FACTORS])
+    keep = {name: getattr(other, name) for name in names}
+    for name, low, high in DAMAGE_SCALES:
+        setattr(other, name, keep[name] * rng.uniform(low, high))
+    other.GROUP_LOSS = min(1.0, other.GROUP_LOSS)
+    for name, low, high in DAMAGE_VALUES:
         setattr(other, name, rng.uniform(low, high))
+    power = rng.uniform(*SITUATION_POWER)
+    for name in SITUATION_FACTORS:
+        factors = np.asarray(keep[name], dtype=np.float64) ** power
+        if name in SIDED and rng.rand() < 0.5:
+            factors = factors[::-1]
+        setattr(other, name, tuple(factors) if factors.ndim else float(factors))
     try:
         return other.damage(match, seed)
     finally:
@@ -97,9 +127,11 @@ def randomised_damage(match, seed):
 
 
 def training_copy(job):
-    """One damaged copy of one match as sampled feature rows, saved to disk. Teams both ways round."""
-    name, copy = job
-    path = os.path.join(WORK_DIR, "train_{}_{}.npz".format(name, copy))
+    """One damaged copy of one match as sampled feature rows, saved to disk. Teams both ways round.
+
+    The folder comes with the job, because the worker processes never see what --all changed."""
+    name, copy, work_dir = job
+    path = os.path.join(work_dir, "train_{}_{}.npz".format(name, copy))
     if os.path.isfile(path):
         return path
 
@@ -124,7 +156,7 @@ def training_copy(job):
 
 def stage_features():
     os.makedirs(WORK_DIR, exist_ok=True)
-    jobs = [(name, copy) for name in TUNING for copy in range(COPIES_PER_MATCH)]
+    jobs = [(name, copy, WORK_DIR) for name in TRAIN for copy in range(COPIES_PER_MATCH)]
     start = time.time()
     with multiprocessing.get_context("spawn").Pool(N_PROCESSES) as pool:
         for count, path in enumerate(pool.imap_unordered(training_copy, jobs), start=1):
@@ -157,12 +189,12 @@ def check_points(booster, name, seed):
 
 
 def stage_cv():
-    """Train without each tuning match in turn, and keep the predictions for the one left out."""
+    """Train without each training match in turn, and keep the predictions for the one left out."""
     import lightgbm
     results = []
-    for left_out in TUNING:
+    for left_out in TRAIN:
         start = time.time()
-        train_names = [name for name in TUNING if name != left_out]
+        train_names = [name for name in TRAIN if name != left_out]
         X, y, names = load_rows(train_names)
         X_valid, y_valid, _ = load_rows([left_out])
         train = lightgbm.Dataset(X, y, feature_name=names, free_raw_data=True)
@@ -188,9 +220,9 @@ def score_levels(truths, runs, codes):
 
 
 def load_checks():
-    """The tuning matches under default damage, with their out-of-fold points and possession_v2."""
+    """The training matches under default damage, with their out-of-fold points and possession_v2."""
     items = []
-    for name in TUNING:
+    for name in TRAIN:
         match = other.load_match(STEMS[name], other.DATA_DIR)
         truths = [match["truth"] if not level else other.absorb_touches(match["truth"], level)
                   for level in LEVELS]
@@ -249,13 +281,13 @@ def stage_costs():
 
 
 def stage_final():
-    """Train on all four tuning matches and save the model and its settings."""
+    """Train on every training match and save the model and its settings."""
     import lightgbm
     with open(os.path.join(WORK_DIR, "rounds.json")) as handle:
         rounds = int(round(np.mean(json.load(handle))))
     with open(os.path.join(WORK_DIR, "costs.json")) as handle:
         costs = json.load(handle)
-    X, y, names = load_rows(TUNING)
+    X, y, names = load_rows(TRAIN)
     start = time.time()
     train = lightgbm.Dataset(X, y, feature_name=names)
     booster = lightgbm.train(LIGHTGBM, train, num_boost_round=rounds, valid_sets=[train],
@@ -265,7 +297,8 @@ def stage_final():
     with open(model.SETTINGS_PATH, "w") as handle:
         json.dump({"switch_cost": costs["switch"], "stop_cost": costs["stop"],
                    "restart_cost": costs["restart"], "rounds": rounds,
-                   "trained_on": list(TUNING), "held_back": list(HELD_BACK),
+                   "trained_on": list(TRAIN),
+                   "held_back": [name for name in HELD_BACK if name not in TRAIN],
                    "copies_per_match": COPIES_PER_MATCH, "every_nth_frame": EVERY_NTH_FRAME,
                    "feature_names": names}, handle, indent=2)
     print("trained {} rounds on {} rows in {:.0f} s".format(rounds, len(y), time.time() - start))
@@ -302,18 +335,22 @@ def run_on(booster, costs, name, seed, damage_settings=None):
 
 def stage_test():
     """Score on the held-back matches: the default damage, then damage outside the training mix."""
+    if set(HELD_BACK) <= set(TRAIN):
+        print("nothing is held back with --all: run 'test' before it, without --all")
+        return
     booster, settings = model.load_model()
     costs = model.cost_table(settings["switch_cost"], settings["stop_cost"], settings["restart_cost"])
     print("costs:", settings["switch_cost"], settings["stop_cost"], settings["restart_cost"])
     scenarios = (("default damage", {}),
-                 ("ball missing as often in play as in stoppages", {"BALL_MISSING_DEAD": 0.41}),
-                 ("ball missing far more in stoppages", {"BALL_MISSING_DEAD": 0.95}),
-                 ("very noisy positions", {"BALL_NOISE_M": 1.5, "PLAYER_NOISE_M": 1.0}),
+                 ("ball lost twice as often", {"LOSS_RATE": 2.0 * other.LOSS_RATE}),
+                 ("ball found half as fast", {"FIND_RATE": 0.5 * other.FIND_RATE}),
+                 ("short losses left as gaps", {"FILL_S": 0.0}),
+                 ("short losses drawn in where the ball really was", {"FILL_TRUE": 1.0}),
+                 ("shaky positions, as the first damage had", {"BALL_NOISE_M": 0.4,
+                                                               "PLAYER_NOISE_M": 0.25}),
                  ("many wrong-team tracks", {"WRONG_TEAM": 0.20}),
-                 ("many false ball detections", {"FALSE_BALL_RATE": 0.015}),
-                 ("ball missing much more often", {"BALL_MISSING": 0.60, "BALL_MISSING_DEAD": 0.90}),
-                 ("no ball at all", {"BALL_MISSING": 0.999, "BALL_MISSING_DEAD": 0.999,
-                                     "BALL_GAP_LIVE_S": 60.0, "BALL_GAP_DEAD_S": 60.0}))
+                 ("no ball at all", {"LOSS_RATE": 1e6, "FIND_RATE": 0.0, "FILL_S": 0.0,
+                                     "GLITCH_RATE": 0.0}))
     for title, damage_settings in scenarios:
         rows = {"model": [], "possession_v2": [], "possession_v1": []}
         macro = {key: [] for key in rows}
@@ -345,6 +382,11 @@ def stage_test():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("stage", choices=("features", "cv", "costs", "final", "test"))
+    parser.add_argument("--all", action="store_true",
+                        help="all seven matches, for the model to submit (see the docstring)")
     args = parser.parse_args()
+    if args.all:
+        TRAIN = TUNING + HELD_BACK
+        WORK_DIR = WORK_DIR_ALL
     {"features": stage_features, "cv": stage_cv, "costs": stage_costs, "final": stage_final,
      "test": stage_test}[args.stage]()

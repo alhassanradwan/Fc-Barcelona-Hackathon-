@@ -1,19 +1,18 @@
 {
-  "switch_cost": 12.0,
-  "stop_cost": 32.0,
-  "restart_cost": 32.0,
-  "rounds": 411,
+  "switch_cost": 16.0,
+  "stop_cost": 16.0,
+  "restart_cost": 64.0,
+  "rounds": 617,
   "trained_on": [
     "J03WMX",
     "J03WOH",
     "J03WPY",
-    "J03WQQ"
-  ],
-  "held_back": [
+    "J03WQQ",
     "J03WN1",
     "J03WOY",
     "J03WR9"
   ],
+  "held_back": [],
   "copies_per_match": 3,
   "every_nth_frame": 5,
   "feature_names": [
