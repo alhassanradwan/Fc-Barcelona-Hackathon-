@@ -14,8 +14,10 @@ Why a model at all
 ------------------
 possession_v2 can only use the ball, so on the 41% of graded frames without one it has no evidence.
 The features here add what is still visible then: how each team is shaped and moving, how long the
-ball has been gone, and where it was before and after the gap. possession_v2's own evidence goes in
-as features too, so the model starts from what the rules already know.
+ball has been gone, where it was before and after the gap, and where the players stand when play
+restarts: someone at a touchline for a throw-in or at a corner flag for a corner, players in the
+box, both teams in their own halves for a kick-off. possession_v2's own evidence goes in as features
+too, so the model starts from what the rules already know.
 
 Why Viterbi stays
 -----------------
@@ -23,6 +25,25 @@ The model judges one frame at a time, helped by features that look a few seconds
 answers can still flicker. Viterbi joins them into whole possessions, which is what spellF1 scores.
 Its costs are chosen on predictions for matches the model did not train on, because a model is
 over-confident on its own training data.
+
+Where a change of team is likely
+--------------------------------
+With one switch cost, every change of team needs the same evidence, so a cost low enough to catch
+the quick real changes also lets false ones through in a scramble. When the settings name a change
+model, a second LightGBM model gives the chance that the ball changes team near each frame, and a
+change costs less where that chance is high and more where it is low. Without one, every change
+costs the same, as before.
+
+A second look
+-------------
+The first model keeps making the same kinds of mistake: a flicker to the other team for a moment, a
+change of team drawn a little late. When the settings name a second look, a smaller LightGBM model
+reads the first one's answers up to 2 s either way, and how long its pick and its Viterbi labels
+have held and will hold, and gives its own probabilities, which Viterbi joins with costs chosen for
+them.
+It learned from the first model's answers on matches that model had not seen, so it learned its real
+mistakes (train_possession_model.py, 'second'). Smart Tagging is weighed against the switch cost
+Viterbi actually pays, as before. Without a second look, nothing here changes.
 
 Why the teams are treated alike
 -------------------------------
@@ -42,6 +63,7 @@ import os
 import sys
 
 import numpy as np
+from scipy.ndimage import maximum_filter1d, minimum_filter1d
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -60,6 +82,16 @@ OUT_NAME = "possession_model.csv"
 MODEL_PATH = os.path.join(ROOT, "models", "possession_lgbm.txt")
 SETTINGS_PATH = os.path.join(ROOT, "models", "possession_lgbm.json")
 SMALLEST_PROBABILITY = 1e-4  # so that one frame can never cost more than a few points
+BOX_DEPTH, BOX_HALF_WIDTH = 16.5, 20.16  # metres: the penalty box, from its goal line and middle
+RESTART_WINDOW = 50  # frames, 2 s: how near the touchline and a corner flag before and after
+CHANGE_FILE = "possession_change.txt"  # the change model, kept beside the settings that use it
+LOWEST_SWITCH = 1.0  # a change of team never costs less, however sure the change model is
+SECOND_FILE = "possession_second.txt"  # the second look, kept beside the settings that use it
+SECOND_OFFSETS = (-50, -25, -12, -6, 6, 12, 25, 50)  # frames: 2, 1, 0.5 and 0.25 s either way
+SECOND_WINDOWS = (12, 25, 50, 125)  # frames averaged before and after
+SECOND_SPANS = (12, 25)  # frames either way for the lowest and highest edge
+LONGEST_RUN = 750  # frames, 30 s: runs longer than this all look the same to the second look
+SWAP = [AWAY, HOME, DEAD]  # H, A, D columns with the teams swapped
 
 
 def window_mean(values, before, after):
@@ -121,6 +153,39 @@ def face_the_same_way(ball, xy, team, pitch):
         return ball, xy
     far_corner = np.array(pitch, dtype=np.float64)
     return far_corner - ball, far_corner - xy
+
+
+def restart_features(x, y, tracked, team, pitch):
+    """The features frame_features adds last, by name: who restarts play, from where the players
+    stand. A throw-in is taken at a touchline, a corner at a corner flag, a free kick into the box
+    with players waiting in it, and a kick-off with both teams in their own halves. x and y are
+    turned as frame_features turns them, so the home team attacks towards larger x."""
+    length, width = pitch
+    out, side_gaps, corner_gaps, own_halves = {}, [], [], []
+    for side, tag in ((HOME, "h"), (AWAY, "a")):
+        mine = tracked & (team == side)
+        players = mine.sum(axis=1).astype(np.float64)
+        to_side = np.where(mine, np.minimum(y, width - y), np.inf).min(axis=1)
+        end = length if side == HOME else 0.0  # the goal line this team attacks
+        to_corner = np.where(mine, np.minimum(np.hypot(x - end, y), np.hypot(x - end, y - width)),
+                             np.inf).min(axis=1)
+        deep = (x > length - BOX_DEPTH) if side == HOME else (x < BOX_DEPTH)
+        in_box = mine & deep & (np.abs(y - width / 2.0) < BOX_HALF_WIDTH)
+        at_home = mine & ((x < length / 2.0) if side == HOME else (x > length / 2.0))
+        out["side_gap_" + tag] = np.where(np.isfinite(to_side), to_side, np.nan)
+        out["corner_gap_" + tag] = np.where(np.isfinite(to_corner), to_corner, np.nan)
+        out["in_box_" + tag] = in_box.sum(axis=1).astype(np.float64)
+        out["own_half_" + tag] = at_home.sum(axis=1) / np.where(players > 0, players, np.nan)
+        side_gaps.append(out["side_gap_" + tag])
+        corner_gaps.append(out["corner_gap_" + tag])
+        own_halves.append(out["own_half_" + tag])
+    side_any, corner_any = np.fmin(*side_gaps), np.fmin(*corner_gaps)
+    out["side_gap_before"] = window_mean(side_any, RESTART_WINDOW, 0)
+    out["side_gap_after"] = window_mean(side_any, 0, RESTART_WINDOW)
+    out["corner_gap_before"] = window_mean(corner_any, RESTART_WINDOW, 0)
+    out["corner_gap_after"] = window_mean(corner_any, 0, RESTART_WINDOW)
+    out["both_own_half"] = np.fmin(*own_halves)
+    return out
 
 
 def frame_features(ball, xy, speed, team, pitch):
@@ -249,39 +314,139 @@ def frame_features(ball, xy, speed, team, pitch):
     out["crowd_after_50"] = window_mean(crowd_speed, 0, 50)
     out["speed_gap_5s"] = out["speed_5s_h"] - out["speed_5s_a"]
 
+    # Who restarts play after the ball goes out, from where the players stand.
+    out.update(restart_features(x, y, tracked, team, pitch))
+
     names = list(out)
     return np.column_stack([out[name] for name in names]).astype(np.float32), names
 
 
-def predict_points(booster, ball, xy, speed, team, pitch):
-    """(n, 3) log-probabilities of H, A and D for one half, averaged over swapping the teams."""
-    features, _ = frame_features(ball, xy, speed, team, pitch)
-    direct = booster.predict(features)
-    features, _ = frame_features(ball, xy, speed, 1 - team, pitch)
-    swapped = booster.predict(features)
-    average = (direct + swapped[:, [AWAY, HOME, DEAD]]) / 2.0
+def team_features(ball, xy, speed, team, pitch):
+    """(direct, swapped): the features for one half, as it is and with the teams swapped."""
+    return (frame_features(ball, xy, speed, team, pitch)[0],
+            frame_features(ball, xy, speed, 1 - team, pitch)[0])
+
+
+def points_from(booster, direct, swapped):
+    """(n, 3) log-probabilities of H, A and D, averaged over swapping the teams."""
+    average = (booster.predict(direct) + booster.predict(swapped)[:, [AWAY, HOME, DEAD]]) / 2.0
     return np.log(np.clip(average, SMALLEST_PROBABILITY, 1.0))
 
 
-def best_labels(points, costs):
+def predict_points(booster, ball, xy, speed, team, pitch):
+    """(n, 3) log-probabilities of H, A and D for one half, averaged over swapping the teams."""
+    return points_from(booster, *team_features(ball, xy, speed, team, pitch))
+
+
+def change_from(change_booster, direct, swapped):
+    """(n,) the chance that the ball changes team near each frame, averaged over swapping the teams,
+    which does not change what a change is."""
+    return (change_booster.predict(direct) + change_booster.predict(swapped)) / 2.0
+
+
+def switch_by_frame(chance, settings):
+    """The cost of a change of team into each frame: switch_cost where the change model's chance is
+    its training average, less where it is higher and more where it is lower."""
+    chance = np.clip(chance, SMALLEST_PROBABILITY, 1.0 - SMALLEST_PROBABILITY)
+    surprise = math.log(settings["change_rate"]) - np.log(chance)
+    return np.maximum(LOWEST_SWITCH, settings["switch_cost"] + settings["change_slope"] * surprise)
+
+
+def shifted(values, offset):
+    """values moved so that frame t holds frame t + offset, NaN past either end."""
+    out = np.full(len(values), np.nan)
+    if offset > 0:
+        out[:-offset] = values[offset:]
+    elif offset < 0:
+        out[-offset:] = values[:offset]
+    else:
+        out[:] = values
+    return out
+
+
+def run_facts(labels):
+    """For each frame: (frames since its run of one label began, frames until it ends, the label of
+    the run before, the label of the run after), -1 where there is none."""
+    n = len(labels)
+    changes = np.flatnonzero(labels[1:] != labels[:-1]) + 1
+    starts = np.concatenate(([0], changes))
+    stops = np.concatenate((changes, [n]))
+    run_of = np.repeat(np.arange(len(starts)), stops - starts)
+    index = np.arange(n)
+    run_labels = labels[starts].astype(np.int64)
+    last = len(starts) - 1
+    before = np.where(run_of > 0, run_labels[np.maximum(run_of - 1, 0)], -1)
+    after = np.where(run_of < last, run_labels[np.minimum(run_of + 1, last)], -1)
+    return index - starts[run_of], stops[run_of] - 1 - index, before, after
+
+
+def second_features(points, first_costs):
+    """(n, n_features) float32 for one half, and the names: what the second look reads, from the
+    first model's (n, 3) log-probabilities. first_costs are the first model's own, for its Viterbi
+    labels. points[:, SWAP] gives the features with the teams swapped."""
+    log_h, log_a, log_d = (points[:, k].astype(np.float64) for k in (HOME, AWAY, DEAD))
+    edge = log_h - log_a
+    dead = np.exp(log_d)
+    out = {"log_h": log_h, "log_a": log_a, "log_d": log_d}
+    for offset in SECOND_OFFSETS:
+        out["edge_{:+d}".format(offset)] = shifted(edge, offset)
+        out["dead_{:+d}".format(offset)] = shifted(dead, offset)
+    for window in SECOND_WINDOWS:
+        out["edge_before_{}".format(window)] = window_mean(edge, window, 0)
+        out["edge_after_{}".format(window)] = window_mean(edge, 0, window)
+        out["dead_before_{}".format(window)] = window_mean(dead, window, 0)
+        out["dead_after_{}".format(window)] = window_mean(dead, 0, window)
+    for span in SECOND_SPANS:
+        out["edge_low_{}".format(span)] = minimum_filter1d(edge, 2 * span + 1, mode="nearest")
+        out["edge_high_{}".format(span)] = maximum_filter1d(edge, 2 * span + 1, mode="nearest")
+    for tag, labels in (("pick", np.argmax(points, axis=1)),
+                        ("path", best_labels(points.astype(np.float64), first_costs))):
+        since, until, before, after = run_facts(labels)
+        out[tag] = labels
+        out[tag + "_since"] = np.minimum(since, LONGEST_RUN)
+        out[tag + "_until"] = np.minimum(until, LONGEST_RUN)
+        out[tag + "_length"] = np.minimum(since + until + 1, 2 * LONGEST_RUN)
+        out[tag + "_before"] = before
+        out[tag + "_after"] = after
+    names = list(out)
+    return np.column_stack([out[name] for name in names]).astype(np.float32), names
+
+
+def second_look(second_booster, points, first_costs):
+    """(n, 3) the second look's log-probabilities for one half, from the first model's, averaged
+    over swapping the teams as the first model's are."""
+    points = np.asarray(points, dtype=np.float32)  # as training saved the ones it learned from
+    direct = second_features(points, first_costs)[0]
+    swapped = second_features(points[:, SWAP], first_costs)[0]
+    average = (second_booster.predict(direct) + second_booster.predict(swapped)[:, SWAP]) / 2.0
+    return np.log(np.clip(average, SMALLEST_PROBABILITY, 1.0))
+
+
+def best_labels(points, costs, switches=None):
     """The state for each frame with the most points in total, after paying costs. The Viterbi path.
 
     The same as possession_v2.best_labels, with the costs passed in, because they depend on the
-    model that produced the points. On a tie a change is made as late as possible.
+    model that produced the points. On a tie a change is made as late as possible. switches, if
+    given, is the cost of a change of team into each frame, in place of the one in costs.
     """
     rows = points.tolist()
+    by_frame = None if switches is None else switches.tolist()
     states = range(len(costs))
     score = rows[0]
     came_from = [None] * len(rows)
+    table = costs
 
     for frame in range(1, len(rows)):
+        if by_frame is not None:
+            switch = by_frame[frame]
+            table = ((0.0, switch, costs[0][2]), (switch, 0.0, costs[1][2]), costs[2])
         previous, score = score, [0.0] * len(costs)
         origins = []
         for state in states:
             best, origin = previous[state], state
             for other in states:
-                if other != state and previous[other] - costs[other][state] >= best - TIE:
-                    best, origin = previous[other] - costs[other][state], other
+                if other != state and previous[other] - table[other][state] >= best - TIE:
+                    best, origin = previous[other] - table[other][state], other
             score[state] = best + rows[frame][state]
             origins.append(origin)
         came_from[frame] = origins
@@ -333,15 +498,37 @@ def read_full_tracking(raw_path, team_of_track, n_frames, pitch, blocks):
     return ball, xy, speed
 
 
-def load_model():
+def load_model(model_path=MODEL_PATH, settings_path=SETTINGS_PATH):
     """(booster, settings). A readable error if the training has not been run."""
-    if not os.path.isfile(MODEL_PATH) or not os.path.isfile(SETTINGS_PATH):
+    if not os.path.isfile(model_path) or not os.path.isfile(settings_path):
         raise IOError("no trained model at {}.\nRun python starter/train_possession_model.py "
-                      "first, or restore it from the repository.".format(MODEL_PATH))
+                      "first, or restore it from the repository.".format(model_path))
     import lightgbm
-    with open(SETTINGS_PATH) as handle:
+    with open(settings_path) as handle:
         settings = json.load(handle)
-    return lightgbm.Booster(model_file=MODEL_PATH), settings
+    return lightgbm.Booster(model_file=model_path), settings
+
+
+def load_change_model(settings, settings_path=SETTINGS_PATH):
+    """The change model these settings use, kept beside them, or None if they use none."""
+    if not settings.get("change_model"):
+        return None
+    path = os.path.join(os.path.dirname(settings_path), settings["change_model"])
+    if not os.path.isfile(path):
+        raise IOError("the settings at {} use {}, which is missing".format(settings_path, path))
+    import lightgbm
+    return lightgbm.Booster(model_file=path)
+
+
+def load_second_model(settings, settings_path=SETTINGS_PATH):
+    """The second look these settings name, kept beside them, or None if they name none."""
+    if not settings.get("second_model"):
+        return None
+    path = os.path.join(os.path.dirname(settings_path), settings["second_model"])
+    if not os.path.isfile(path):
+        raise IOError("the settings at {} use {}, which is missing".format(settings_path, path))
+    import lightgbm
+    return lightgbm.Booster(model_file=path)
 
 
 def build(game=GAME, data_dir=None):
@@ -351,7 +538,19 @@ def build(game=GAME, data_dir=None):
     pitch = GAMES[game]["pitch"]
     blocks = half_video_blocks(game)
     booster, settings = load_model()
-    costs = cost_table(settings["switch_cost"], settings["stop_cost"], settings["restart_cost"])
+    change_booster = load_change_model(settings)
+    second_booster = load_second_model(settings)
+    first_costs = cost_table(settings["switch_cost"], settings["stop_cost"],
+                             settings["restart_cost"])
+    costs = first_costs
+    if second_booster is not None:
+        if change_booster is not None:
+            raise ValueError("the settings name both a change model and a second look, which were "
+                             "never trained together")
+        chosen = settings["second_costs"]
+        costs = cost_table(chosen["switch"], chosen["stop"], chosen["restart"])
+        print("with the second look, costs {:g} {:g} {:g}".format(
+            chosen["switch"], chosen["stop"], chosen["restart"]))
 
     print("reading {} ...".format(os.path.basename(raw_path)))
     team_of_track = team_of_each_track(meta_path)
@@ -363,16 +562,22 @@ def build(game=GAME, data_dir=None):
         print("WARNING: player speeds do not look like m/s, so the dead-ball features are unreliable")
 
     tags = tag_points(load_smart_tagging(game, data_dir), team_names(meta_path), n_frames, blocks)
-    tag_scale = settings["switch_cost"] / possession_v2.SWITCH_COST
+    tag_scale = costs[HOME][AWAY] / possession_v2.SWITCH_COST  # the switch cost Viterbi pays here
 
     labels = np.full(n_frames, "X", dtype="<U1")
     for half, first, last in blocks:
         print("predicting half {} ...".format(half))
         stop = last + 1
         team = np.broadcast_to(team_of_track, (stop - first, len(team_of_track)))
-        points = predict_points(booster, ball[first:stop], xy[first:stop].astype(np.float64),
-                                speed[first:stop].astype(np.float64), team, pitch)
-        labels[first:stop] = LABELS[best_labels(points + tag_scale * tags[first:stop], costs)]
+        direct, swapped = team_features(ball[first:stop], xy[first:stop].astype(np.float64),
+                                        speed[first:stop].astype(np.float64), team, pitch)
+        points = points_from(booster, direct, swapped)
+        if second_booster is not None:
+            points = second_look(second_booster, points, first_costs).astype(np.float32)
+        switches = (None if change_booster is None
+                    else switch_by_frame(change_from(change_booster, direct, swapped), settings))
+        labels[first:stop] = LABELS[best_labels(points + tag_scale * tags[first:stop], costs,
+                                                switches)]
     return labels
 
 

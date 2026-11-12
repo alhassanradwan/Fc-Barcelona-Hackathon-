@@ -125,6 +125,10 @@ GLITCH_FRAMES = 6.9
 BALL_EDGE_BLUR_S = 3.0     # how far 'in a stoppage' misses the true edges of one
 ROLL_S = (0.5, 2.0)        # a ball that goes dead rolls on for this long before it stops
 ROLL_MAX_MS = 25.0
+# The path drawn for a stoppage starts on its true first frame, which a model could learn to spot.
+# Above zero, the start moves by about this many seconds either way, from a stream of its own so that
+# every other draw stays as it was. Only train_possession_model.py's 'test' sets it, as a leak check.
+DEAD_START_SHIFT_S = 0.0
 # The ATD's positions are smoother from frame to frame than these files', ball and players alike,
 # so they are smoothed over about this many frames.
 BALL_SMOOTH_FRAMES = 8.0
@@ -338,33 +342,57 @@ def smoothed(values, frames, blocks):
     return out.reshape(values.shape)
 
 
-def move_dead_ball(ball, truth, rng):
+def dead_path_start(truth, start, stop, previous, shift_rng):
+    """Where the drawn path of the stoppage [start, stop) begins, moved by DEAD_START_SHIFT_S.
+
+    It never begins before SPEED_LAG frames of the play before it, nor past halfway through.
+    """
+    spread = DEAD_START_SHIFT_S * FPS
+    first = start + int(round(np.clip(shift_rng.normal(0.0, spread), -2.0 * spread, 2.0 * spread)))
+    first = min(max(first, previous + SPEED_LAG + 1), start + (stop - start) // 2)
+    if first < start and np.any(truth[first - SPEED_LAG:start] == pm.X):
+        return start
+    return first
+
+
+def move_dead_ball(ball, truth, rng, shift_rng=None):
     """A copy of ball that moves during stoppages, because these files freeze it on those frames.
 
     It rolls on from where it went dead and comes to rest, waits, is carried to where play restarts
     with some wander along the way, and is then placed there. Each stoppage takes its own timing.
+    With shift_rng the rolling starts off the true first frame: early, over the last of the play, or
+    late, with the ball carrying on as it was going until then. The restart is the real ball being
+    struck, so its end stays where it is.
     """
     out = ball.copy()
+    previous = 0
     for start, stop, code in pm.segments(truth, pm.valid_runs(truth)):
         if code != pm.D:
+            previous = start
             continue
-        begin = ball[start]
+        first = start if shift_rng is None else dead_path_start(truth, start, stop, previous,
+                                                                 shift_rng)
+        anchor = min(first, start)  # the last frame the path takes the ball's motion from
+        begin = ball[anchor]
         end = ball[stop] if stop < len(ball) and truth[stop] != pm.X else ball[stop - 1]
         velocity = np.zeros(2)
-        if start >= SPEED_LAG and truth[start - SPEED_LAG] != pm.X:
-            velocity = np.nan_to_num((begin - ball[start - SPEED_LAG]) * FPS / float(SPEED_LAG))
-            pace = math.hypot(velocity[0], velocity[1])
-            if pace > ROLL_MAX_MS:
-                velocity = velocity * ROLL_MAX_MS / pace
+        if anchor >= SPEED_LAG and truth[anchor - SPEED_LAG] != pm.X:
+            velocity = np.nan_to_num((begin - ball[anchor - SPEED_LAG]) * FPS / float(SPEED_LAG))
+        if first > start:
+            out[start:first] = begin + np.outer(np.arange(first - start) / float(FPS), velocity)
+            begin = begin + velocity * (first - start) / float(FPS)
+        pace = math.hypot(velocity[0], velocity[1])
+        if pace > ROLL_MAX_MS:
+            velocity = velocity * ROLL_MAX_MS / pace
         roll = rng.uniform(*ROLL_S)
-        rolling = np.minimum(np.arange(stop - start) / float(FPS), roll)
+        rolling = np.minimum(np.arange(stop - first) / float(FPS), roll)
         rolled = begin + np.outer(rolling - rolling * rolling / (2.0 * roll), velocity)
-        where = np.linspace(0.0, 1.0, stop - start)
+        where = np.linspace(0.0, 1.0, stop - first)
         leaves, arrives = rng.uniform(0.1, 0.5), rng.uniform(0.6, 0.95)
         share = np.clip((where - leaves) / (arrives - leaves), 0.0, 1.0)
         share = share * share * (3.0 - 2.0 * share)  # gather pace, then slow down
         wander = np.sin(np.pi * share)[:, np.newaxis] * rng.normal(0.0, 3.0, 2)
-        out[start:stop] = rolled + (end - rolled[-1]) * share[:, np.newaxis] + wander
+        out[first:stop] = rolled + (end - rolled[-1]) * share[:, np.newaxis] + wander
     return out
 
 
@@ -558,7 +586,8 @@ def damage_players(match, ball_hidden, rng):
 def damage(match, seed):
     """A copy of the match that looks like the ATD. Same seed, same damage."""
     rng = np.random.RandomState(seed)
-    ball = move_dead_ball(match["ball"], match["truth"], rng)
+    shift_rng = np.random.RandomState([seed, 1]) if DEAD_START_SHIFT_S else None
+    ball = move_dead_ball(match["ball"], match["truth"], rng, shift_rng)
     ball, hidden = damage_ball(match, ball, rng)
     xy, speed, team_of = damage_players(match, hidden, rng)
     return dict(match, ball=ball, xy=xy, speed=speed, team_of=team_of)
