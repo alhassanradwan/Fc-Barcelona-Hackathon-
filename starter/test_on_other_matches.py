@@ -77,7 +77,7 @@ from baseline import AWAY, HOME, NOBODY, VARIANTS, smooth  # noqa: E402
 from possession_v1 import FPS, tag_points  # noqa: E402
 
 # Params
-DATA_DIR = os.path.join(os.path.dirname(ROOT), "external_data", "idsse")
+DATA_DIR = os.environ.get("IDSSE_DIR") or os.path.join(os.path.dirname(ROOT), "external_data", "idsse")
 MATCHES = ("DFL-COM-000001_DFL-MAT-J03WMX", "DFL-COM-000001_DFL-MAT-J03WN1",
            "DFL-COM-000002_DFL-MAT-J03WOH", "DFL-COM-000002_DFL-MAT-J03WOY",
            "DFL-COM-000002_DFL-MAT-J03WPY", "DFL-COM-000002_DFL-MAT-J03WQQ",

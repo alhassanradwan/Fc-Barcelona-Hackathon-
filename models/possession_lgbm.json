@@ -1,8 +1,8 @@
 {
-  "switch_cost": 8.0,
+  "switch_cost": 12.0,
   "stop_cost": 64.0,
-  "restart_cost": 8.0,
-  "rounds": 617,
+  "restart_cost": 32.0,
+  "rounds": 582,
   "touch_s": 0.0,
   "trained_on": [
     "J03WMX",
@@ -102,13 +102,26 @@
     "crowd_around_125",
     "crowd_before_50",
     "crowd_after_50",
-    "speed_gap_5s"
+    "speed_gap_5s",
+    "side_gap_h",
+    "corner_gap_h",
+    "in_box_h",
+    "own_half_h",
+    "side_gap_a",
+    "corner_gap_a",
+    "in_box_a",
+    "own_half_a",
+    "side_gap_before",
+    "side_gap_after",
+    "corner_gap_before",
+    "corner_gap_after",
+    "both_own_half"
   ],
   "second_model": "possession_second.txt",
-  "second_rounds": 202,
+  "second_rounds": 181,
   "second_costs": {
-    "switch": 4.0,
+    "switch": 12.0,
     "stop": 8.0,
-    "restart": 16.0
+    "restart": 32.0
   }
 }

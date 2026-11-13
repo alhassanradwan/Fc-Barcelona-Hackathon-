@@ -133,7 +133,7 @@ COPIES_PER_MATCH = 3
 EVERY_NTH_FRAME = 5  # neighbouring frames say almost the same thing
 TRAINING_SEED = 40
 CHECK_SEEDS = (11, 12)  # default damage, for comparing with possession_v2 when choosing costs
-N_PROCESSES = 8
+N_PROCESSES = int(os.environ.get("N_PROCESSES", 8))
 
 # Drawn afresh for every training copy. (name in test_on_other_matches, lowest, highest) as
 # multiples of the measured setting there, then as plain values.
@@ -158,7 +158,7 @@ LIGHTGBM = {"objective": "multiclass", "num_class": 3, "metric": "multi_logloss"
             "learning_rate": 0.05, "num_leaves": 63, "min_data_in_leaf": 500,
             "feature_fraction": 0.7, "bagging_fraction": 0.7, "bagging_freq": 1,
             "lambda_l2": 5.0, "seed": 2027, "deterministic": True, "force_row_wise": True,
-            "num_threads": 16, "verbosity": -1}
+            "num_threads": int(os.environ.get("LGBM_THREADS", 16)), "verbosity": -1}
 MOST_ROUNDS = 800
 PATIENCE = 40
 LOG_EVERY = 25
@@ -187,6 +187,17 @@ START_COSTS = {"switch": 24.0, "stop": 32.0, "restart": 32.0}
 COST_SEARCH = (("switch", SWITCH_COSTS), ("stop", STOP_COSTS), ("restart", RESTART_COSTS),
                ("switch", SWITCH_COSTS))
 COST_COLUMNS = (("switch", 7, 0), ("stop", 6, 0), ("restart", 7, 0))
+# After the coarse grid, FINE_COSTS=1 walks each cost by these factors around the best so far,
+# repeating while it still improves, so the costs are not stuck on the grid's powers of two.
+FINE_COSTS = os.environ.get("FINE_COSTS") == "1"
+FINE_FACTORS = (0.6, 0.75, 0.875, 1.15, 1.33, 1.6)
+FINE_ROUNDS = 3
+# COST_LEVELS="2,5" chooses the costs on the mean spellF1 over those versions of the labels (seconds
+# of brief touches handed back) rather than on TOUCH_S alone. CHALLENGE.md says brief touches do
+# not count in the Barcelona answers, so these may sit nearer them than the labels as given.
+COST_LEVELS = tuple(float(v) for v in os.environ.get("COST_LEVELS", "").split(",") if v)
+# WORK_SUFFIX keeps a variant's costs, second look and model apart from the default work files.
+WORK_SUFFIX = os.environ.get("WORK_SUFFIX", "")
 
 
 def as_arrays(match):
@@ -519,6 +530,9 @@ def scorer(items, rate=None):
             rows.append(score_levels(item["truths"], item["runs"], codes))
             counts.append(len(pm.possession_spells(codes, item["runs"])))
         means = np.mean(rows, axis=0)
+        if COST_LEVELS:  # choose on the mean over these versions of the labels instead
+            target = float(np.mean([means[LEVELS.index(level)] for level in COST_LEVELS]))
+            return target, means, float(np.mean(counts))
         return float(means[choice]), means, float(np.mean(counts))
     return evaluate
 
@@ -543,6 +557,29 @@ def search_costs(evaluate, settings, search, columns):
             if score > best:
                 best, settings = score, trial
         print("  best so far: {} -> {:.4f}".format(settings, best), flush=True)
+    if FINE_COSTS:
+        tried = {tuple(sorted(t.items())) for t, _, _ in trials}
+        for round_index in range(FINE_ROUNDS):
+            improved = False
+            for key in ("switch", "stop", "restart"):
+                for factor in FINE_FACTORS:
+                    trial = dict(settings, **{key: round(settings[key] * factor, 2)})
+                    signature = tuple(sorted(trial.items()))
+                    if signature in tried:
+                        continue
+                    tried.add(signature)
+                    score, means, count = evaluate(trial)
+                    print("{} | {}  {:>6.4f} {:>5.0f}  fine".format(
+                        " ".join("{:>{}.{}f}".format(trial[column], width, max(places, 2))
+                                 for column, width, places in columns),
+                        " ".join("{:>6.3f}".format(m) for m in means), score, count), flush=True)
+                    trials.append((trial, score, float(np.mean(means))))
+                    if score > best:
+                        best, settings, improved = score, trial, True
+            print("  fine round {}: {} -> {:.4f}".format(round_index + 1, settings, best),
+                  flush=True)
+            if not improved:
+                break
     overall, chosen = break_tie(trials, best)
     if chosen != settings:
         print("tied with the best (within {} of {:.4f}); best over all {} versions: {} -> "
@@ -615,6 +652,10 @@ def stage_second():
             left_out, sum(len(row[1]) for row, keep in zip(rows, kept) if keep),
             booster.best_iteration,
             booster.best_score["valid_0"]["multi_logloss"], time.time() - start), flush=True)
+
+    for look in looks:  # out-of-fold second-look points, for tuning anything after Viterbi
+        np.save(os.path.join(WORK_DIR, "oof2_{}_{}.npy".format(look["name"], look["seed"])),
+                look["points"])
 
     print("\ncosts for the second look:")
     chosen = search_costs(scorer(looks), dict(START_COSTS), COST_SEARCH, COST_COLUMNS)
@@ -885,5 +926,6 @@ if __name__ == '__main__':
     TOUCH_S = args.touch
     if TOUCH_S:
         WORK_DIR += "_touch{:.0f}".format(TOUCH_S)
+    WORK_DIR += WORK_SUFFIX
     {"features": stage_features, "cv": stage_cv, "costs": stage_costs, "second": stage_second,
      "final": stage_final, "test": stage_test}[args.stage]()
