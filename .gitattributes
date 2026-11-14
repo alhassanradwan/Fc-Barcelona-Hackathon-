@@ -1,0 +1,4 @@
+# The trained models must reach every machine byte for byte. Without this line, git on Windows
+# (core.autocrlf=true) turns their line endings into CRLF on checkout, and LightGBM then cannot
+# read them ("Model format error, expect a tree here").
+models/* -text
