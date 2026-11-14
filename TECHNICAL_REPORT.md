@@ -1,6 +1,6 @@
 # Ball possession from broken tracking: a LightGBM model, a second look, and Viterbi
 
-*More than a Hack 2027, Phase 1 - technical document*
+*More than a Hack 2027, Phase 1 - technical document - Team **Tailors***
 
 **Result on the public 5 minutes:** spellF1 **0.676**, macroF1 **0.871** (baseline 0.424 / 0.581).
 **Result on three unseen practice matches** (never used to train or choose anything): spellF1
