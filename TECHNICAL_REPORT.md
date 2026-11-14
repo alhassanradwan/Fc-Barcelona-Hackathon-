@@ -58,12 +58,19 @@ tracking (ATD) --> 99 features per frame --> LightGBM: P(H), P(A), P(D) per fram
 | Broadcast tracking | no | the tactical tracking covers the whole pitch |
 | Videos | no | |
 | Public 5-minute ground truth | **only as a final check** | never used to train, tune or choose between versions |
+| **External data: IDSSE** | **yes** | 7 public professional matches with official labels: our only training data (section 3) |
+| Hand labels | **none** | no frame of any game was labelled or corrected by hand |
+| LLMs | **as a coding assistant only** | we used Claude (Anthropic) to help write, review and comment the code and this document. No LLM is part of the pipeline, and no match data (video, tracking, tags, ground truth) was ever given to one, as the terms require |
 
 **Why Smart Tagging stays out of the models:** the training matches have no Smart Tagging, and
 tags invented for them would teach the model to trust tags too much. So the tags are added only
 at the Viterbi step, scaled to the same weight they have in our rule-based method.
 
-## 3. Training data
+## 3. Training data: other matches, damaged to look like ours
+
+The provided game has no labels we may train on (the public 5 minutes are only a check), so the
+model learns from **seven other professional matches** whose official data says who has the ball
+on every frame.
 
 | | |
 |---|---|
@@ -74,12 +81,25 @@ at the Viterbi step, scaled to the same weight they have in our rule-based metho
 | **How much** | 7 matches x 3 damaged copies, every 5th frame, both team orientations: **1.2 million rows** for the final model |
 | **From the provided game?** | **No.** Nothing from the Barcelona match is used for training or tuning |
 
-**Damaged copies.** The IDSSE tracking is clean; the competition's is not. We measured how the
-ATD breaks (only whole-match shares and rates, with `starter/measure_tracking.py`) and broke each
-training match the same way: the ball goes missing in long gaps, mostly when slow among players,
-and reappears when struck; the ball position and player speeds get a little noise; players drop
-out in groups; a few tracks pick up a player of the wrong team. Each of the 3 copies gets its own random settings around the measured values, so
-the model learns football and not one pattern of damage.
+**Why we damage the training data.** The IDSSE tracking is clean: the ball is almost always
+there. The competition's tracking (ATD) is not: the ball is missing on 41% of graded frames, and
+players drop out. A model trained on clean data would never have learned what to do when the ball
+is gone, which is exactly where this match is hardest. So before training, every IDSSE match is
+broken on purpose to look like the ATD (`damage` in `starter/test_on_other_matches.py`).
+
+**How we made it look the same.** `starter/measure_tracking.py` measures how the ATD breaks, using
+only the tracking and only whole-match numbers (shares, rates, percentiles; no labels, no frame
+numbers): how often the ball goes missing, for how long, where, and when it is found again. It
+prints the same numbers for the damaged IDSSE matches, and the damage settings were set until the
+two agreed. The result: the ball goes missing in long gaps, mostly when slow among players, and
+reappears when struck; short losses are drawn in, as the ATD's tracker does; the ball position and
+player speeds get a little noise; players drop out in groups; a few tracks pick up a player of the
+wrong team. Two leaks are removed on purpose: the ball is never frozen during stoppages, and it does
+not vanish or reappear exactly where the true labels change.
+
+**Three different copies of each match.** Each copy gets its own random settings around the
+measured values, so the model learns football and not one pattern of damage. Section 5 also tests
+kinds of damage that were not in the training mix.
 
 **Honest splits.** Frames of one match are nearly identical, so we always split by whole match.
 Four matches (J03WMX, J03WOH, J03WPY, J03WQQ) were used to develop and choose; three (J03WN1,

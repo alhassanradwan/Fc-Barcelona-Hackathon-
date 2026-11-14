@@ -32,7 +32,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-for folder in (ROOT, HERE):
+for folder in (os.path.join(ROOT, "evaluation"), ROOT, HERE):
     sys.path.insert(0, folder)
 from baseline import AWAY, HOME, team_of_each_track  # noqa: E402
 from games import GAME, GAMES, half_video_blocks, require, source_frames  # noqa: E402
@@ -199,9 +199,11 @@ def summary(parts):
     rows = []
 
     def add(label, value, unit):
+        """One printed row."""
         rows.append((label, value, unit))
 
     def section(title):
+        """A heading between groups of rows."""
         rows.append((title, None, "section"))
 
     minutes = joined["frames"].sum() / float(FPS) / 60.0
@@ -297,6 +299,8 @@ def summary(parts):
     n_ends = float(max(end_active.sum(), 1))
 
     def found(label, at_end, at_frame):
+        """How much likelier the ball is found again in this situation than chance: the share of
+        gap ends in it, divided by the share of all tracked frames in it."""
         share_end = (end_active & at_end).sum() / n_ends
         share_all = (seen_active & at_frame).sum() / n_seen_active
         add(label, (share_end / share_all if share_all > 0 else np.nan, share_end), "ratio")
@@ -466,7 +470,7 @@ def read_other(names):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--other", action="store_true",
                         help="measure the IDSSE matches instead, damaged and clean")
     parser.add_argument("--matches", nargs="*", help="IDSSE codes for --other, such as J03WN1")

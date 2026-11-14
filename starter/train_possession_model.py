@@ -365,6 +365,7 @@ def scorer(items):
     """evaluate(trial) for search_costs: (spellF1 on the labels as given, spellF1 on each of LEVELS,
     possessions per match) for the items' points decoded with the trial's costs."""
     def evaluate(trial):
+        """Decode every item with this trial's costs and score it."""
         costs = model.cost_table(trial["switch"], trial["stop"], trial["restart"])
         rows, counts = [], []
         for item in items:
