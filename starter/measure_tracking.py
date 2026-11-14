@@ -1,12 +1,17 @@
-"""Measure how the tracking breaks, as whole-match numbers, so the simulated damage can copy it.
+"""Measure how the competition's tracking breaks, so practice matches can be damaged the same way.
 
-    python starter/measure_tracking.py            # the provided match: one table to paste
+In short
+--------
+The model learns on public matches whose clean tracking test_on_other_matches.damage breaks on
+purpose, to look like the competition's tracking (the ATD). DATA.md gives only the shares of missing
+ball and players. How long the gaps last, where they happen and how noisy the positions are, it
+does not. This file prints the same whole-match numbers for the ATD and for the damaged public
+matches, and the damage settings in test_on_other_matches.py were set so that the two agree.
+
+It was used once, to set those values. The model does not need it to run.
+
+    python starter/measure_tracking.py            # the provided match: one table
     python starter/measure_tracking.py --other    # the same table for the IDSSE matches
-
-The model learns on public matches that test_on_other_matches.damage makes look like the ATD. Only
-the shares of missing ball and players came from DATA.md. How long the gaps last, where they happen
-and how noisy the positions are were assumptions. This prints the same numbers for the ATD and for
-the damaged public matches, so the damage can be set to agree with what the ATD really does.
 
 What it reads and prints
 ------------------------

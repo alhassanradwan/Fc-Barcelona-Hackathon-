@@ -1,14 +1,19 @@
-"""Test the possession scripts on other full matches, where the answers are public.
+"""Test methods on seven other full matches whose answers are public, with their tracking damaged.
 
-The match this competition is about has five public minutes of ground truth, and RULES.md says they
-are not for tuning. Other games are allowed in any amount, so this is the way to measure a method
-over whole matches and to choose between versions of it.
+In short
+--------
+Nothing may be tuned on the Barcelona match: its five public minutes are only a check (RULES.md).
+Other matches are allowed in any amount. So this file loads seven public IDSSE matches, which come
+with a true label for every frame, damages their tracking so that it breaks the way the
+competition's tracking (the ATD) breaks, and scores each method on them with the competition's own
+scorer. train_possession_model.py uses the same matches and the same damage to train the model.
 
     python starter/test_on_other_matches.py --matches J03WN1 J03WOY J03WR9    # the held-back three
     python starter/test_on_other_matches.py                                   # all seven matches
 
-possession_v2 was tuned on J03WMX, J03WOH, J03WPY and J03WQQ, so only the other three say anything
-honest about it, and only until they are used to choose between versions too.
+Four matches (J03WMX, J03WOH, J03WPY, J03WQQ) are for tuning: every choice is made on them. The
+other three (J03WN1, J03WOY, J03WR9) are held back for an honest last check, and they stay honest
+only as long as they are never used to choose between versions.
 
 The data
 --------
@@ -17,8 +22,9 @@ licensed CC-BY 4.0, data owner DFL.
 Bassek et al., Scientific Data 12, 195 (2025), https://doi.org/10.1038/s41597-025-04505-y
 
 Every frame of the ball says whether it is in play (BallStatus) and which team has it
-(BallPossession), which is everything a frame,label ground truth needs. Download the files into
---data-dir, which defaults to a folder beside this repository so nothing large can be committed:
+(BallPossession), which is everything a frame-by-frame ground truth needs. Download the files into
+external_data/idsse beside this repository, so nothing large can be committed (or pass --data-dir,
+or set the IDSSE_DIR environment variable, to use another folder):
 
     https://huggingface.co/datasets/pysport/idsse-data
 
@@ -77,7 +83,9 @@ from baseline import AWAY, HOME, NOBODY, VARIANTS, smooth  # noqa: E402
 from possession_v1 import FPS, tag_points  # noqa: E402
 
 # Params
-DATA_DIR = os.environ.get("IDSSE_DIR") or os.path.join(os.path.dirname(ROOT), "external_data", "idsse")
+# Where the IDSSE files are: external_data/idsse beside the repository, unless IDSSE_DIR says else.
+DATA_DIR = (os.environ.get("IDSSE_DIR")
+            or os.path.join(os.path.dirname(ROOT), "external_data", "idsse"))
 MATCHES = ("DFL-COM-000001_DFL-MAT-J03WMX", "DFL-COM-000001_DFL-MAT-J03WN1",
            "DFL-COM-000002_DFL-MAT-J03WOH", "DFL-COM-000002_DFL-MAT-J03WOY",
            "DFL-COM-000002_DFL-MAT-J03WPY", "DFL-COM-000002_DFL-MAT-J03WQQ",
@@ -93,9 +101,9 @@ STICKY_LEVELS = (2.0, 5.0, 8.0)  # seconds: shorter spells between two of the ri
 # (see the module docstring). train_possession_model.py draws each one from a range around these.
 #
 # The ball. Chances per frame of the tracker losing it, and of finding it again once lost, times a
-# factor for its situation: its speed over the SPEED_LAG frames before or after (under 3, 3-10, 10-20
-# and over 20 m/s), the crowd round it and where it is. They are set so that gaps start and end in
-# the same situations as the ATD's, as measure_tracking.py counts them.
+# factor for its situation: its speed over the SPEED_LAG frames before or after (under 3, 3-10,
+# 10-20 and over 20 m/s), the crowd round it and where it is. They are set so that gaps start and
+# end in the same situations as the ATD's, as measure_tracking.py counts them.
 SPEED_LAG = 4
 SPEEDS = (3.0, 10.0, 20.0)
 LOSS_RATE = 0.00042
@@ -109,7 +117,8 @@ FIND_RATE = 0.025
 FIND_BY_SPEED = (0.03, 0.26, 1.1, 39.0)
 FIND_DEAD = 1.5
 # The ATD seldom shows the ball off the pitch, but never loses it at speed, so it is hidden there
-# once it is more than OUTSIDE_M out and slower than OUTSIDE_SLOW_MS: lying, or carried to a restart.
+# once it is more than OUTSIDE_M out and slower than OUTSIDE_SLOW_MS: lying, or carried to a
+# restart.
 OUTSIDE_M = 1.0
 OUTSIDE_SLOW_MS = 3.0
 # The ATD has no gaps of 1 to 5 seconds: the tracker draws shorter losses in itself. Here that is a
@@ -118,16 +127,17 @@ OUTSIDE_SLOW_MS = 3.0
 FILL_S = 5.0
 FILL_TRUE = 0.0
 FILL_SPEED_CAP = 10.0      # m/s, the most it lets the drawn-in ball leave or arrive at
-# Blips of under a second, mostly as the ball is struck, which the tracker leaves as gaps. The chance
-# per frame is GLITCH_RATE times how sharply the ball changes velocity there.
+# Blips of under a second, mostly as the ball is struck, which the tracker leaves as gaps. The
+# chance per frame is GLITCH_RATE times how sharply the ball changes velocity there.
 GLITCH_RATE = 0.53
 GLITCH_FRAMES = 6.9
 BALL_EDGE_BLUR_S = 3.0     # how far 'in a stoppage' misses the true edges of one
 ROLL_S = (0.5, 2.0)        # a ball that goes dead rolls on for this long before it stops
 ROLL_MAX_MS = 25.0
 # The path drawn for a stoppage starts on its true first frame, which a model could learn to spot.
-# Above zero, the start moves by about this many seconds either way, from a stream of its own so that
-# every other draw stays as it was. Only train_possession_model.py's 'test' sets it, as a leak check.
+# Above zero, the start moves by about this many seconds either way, from a stream of its own so
+# that every other draw stays as it was. Only train_possession_model.py's 'test' sets it, as a
+# leak check.
 DEAD_START_SHIFT_S = 0.0
 # The ATD's positions are smoother from frame to frame than these files', ball and players alike,
 # so they are smoothed over about this many frames.
@@ -137,8 +147,9 @@ BALL_NOISE_M = 0.002
 # A tracker's errors persist from frame to frame, so a window cannot simply average them away.
 BALL_DRIFT_M = 0.11
 DRIFT_FRAMES = 12
-# One camera on a tower sees a high ball further along the pitch than it is, because a ball in the air
-# and a point on the grass behind it look the same. SLIDE_LIMIT caps that as a share of the distance.
+# One camera on a tower sees a high ball further along the pitch than it is, because a ball in the
+# air and a point on the grass behind it look the same. SLIDE_LIMIT caps that as a share of the
+# distance.
 CAMERA_BACK_M = 40.0
 CAMERA_HEIGHT_M = 30.0
 SLIDE_LIMIT = 0.3
@@ -174,6 +185,8 @@ PHASE_DEFENDING = 0.4
 PHASE_WRONG = 0.05
 HOME_NAME, AWAY_NAME = "home", "away"
 
+
+# Reading the IDSSE files --------------------------------------------------------------------------
 
 def attributes(line):
     """The attributes of one XML tag as a dict of strings."""
@@ -285,6 +298,8 @@ def load_match(stem, data_dir):
     return match
 
 
+# Small tools for the damage -----------------------------------------------------------------------
+
 def hide_in_bursts(hazard, mean_length, rng):
     """Boolean over frames, True inside a gap. Both arguments are per frame: the chance of a gap
     starting there, and the mean length of a gap that does."""
@@ -308,7 +323,8 @@ def runs(mask):
 
 def slow_noise(size, spread, frames, rng):
     """Random error of this spread that changes smoothly over about `frames`, the way a tracker's
-    errors do. Smooth rather than stepped, so that it does not show as shaking from frame to frame."""
+    errors do. Smooth rather than stepped, so that it does not show as shaking from frame to
+    frame."""
     if spread <= 0.0:
         return np.zeros(size)
     kernel = np.exp(-0.5 * (np.arange(-3 * frames, 3 * frames + 1) / float(frames)) ** 2)
@@ -341,6 +357,8 @@ def smoothed(values, frames, blocks):
             out[first:last + 1, col] = np.where(known, total / np.maximum(weight, 1e-9), np.nan)
     return out.reshape(values.shape)
 
+
+# Damaging the ball --------------------------------------------------------------------------------
 
 def dead_path_start(truth, start, stop, previous, shift_rng):
     """Where the drawn path of the stoppage [start, stop) begins, moved by DEAD_START_SHIFT_S.
@@ -397,7 +415,7 @@ def move_dead_ball(ball, truth, rng, shift_rng=None):
 
 
 def blur_edges(mask, spread, rng):
-    """A copy of mask with the start and end of each run moved at random by about `spread` frames."""
+    """A copy of mask with each run's start and end moved at random by about `spread` frames."""
     edges = np.diff(np.concatenate(([0], mask.astype(np.int8), [0])))
     out = np.zeros(len(mask), dtype=bool)
     for start, stop in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
@@ -467,7 +485,8 @@ def damage_ball(match, ball, rng):
     gaps = match["xy"] - ball[:, np.newaxis, :]
     crowd = np.sum(np.hypot(gaps[..., 0], gaps[..., 1]) < 3.0, axis=1)
     x, y = ball[:, 0], ball[:, 1]
-    in_box = ((x < 16.5) | (x > length - 16.5)) & (np.abs(y - width / 2.0) < 20.16)
+    in_box = ((x < 16.5) | (x > length - 16.5)) & (np.abs(y - width / 2.0) < 20.16)  # penalty boxes
+    # The chance of losing the ball on each frame, and of finding it again, by its situation.
     edge = OUTSIDE_M
     off_pitch = (((x < -edge) | (x > length + edge) | (y < -edge) | (y > width + edge))
                  & (np.nan_to_num(before) < OUTSIDE_SLOW_MS))
@@ -515,6 +534,8 @@ def damage_ball(match, ball, rng):
     out[hidden] = np.nan
     return out, hidden
 
+
+# Damaging the players -----------------------------------------------------------------------------
 
 def nearest_other(xy, chunk=4000):
     """(n, p) distance from each player to the nearest other one. inf where it is not known."""
@@ -584,7 +605,11 @@ def damage_players(match, ball_hidden, rng):
 
 
 def damage(match, seed):
-    """A copy of the match that looks like the ATD. Same seed, same damage."""
+    """A copy of the match whose tracking breaks the way the ATD's does. Same seed, same damage.
+
+    In order: the ball is made to move during stoppages (these files freeze it then, which would
+    give the answer away), then the ball is lost, found, drawn in and blurred, then the players are
+    lost, shaken and sometimes given to the wrong team."""
     rng = np.random.RandomState(seed)
     shift_rng = np.random.RandomState([seed, 1]) if DEAD_START_SHIFT_S else None
     ball = move_dead_ball(match["ball"], match["truth"], rng, shift_rng)
@@ -592,6 +617,8 @@ def damage(match, seed):
     xy, speed, team_of = damage_players(match, hidden, rng)
     return dict(match, ball=ball, xy=xy, speed=speed, team_of=team_of)
 
+
+# Running and scoring the methods ------------------------------------------------------------------
 
 def signals(match):
     """(nearest, nearest_speed, crowd_speed), in the form possession_v1.read_tracking returns."""

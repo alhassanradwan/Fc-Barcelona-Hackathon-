@@ -1,20 +1,27 @@
-"""Possession v1: give every frame points from football rules, then pick the best run of labels.
+"""Possession v1: football rules give every frame points, then Viterbi picks the labels.
 
-The next step up from baseline.py. It has no model, no training and no randomness, so the same data
-always gives the same file. Three steps:
+In short
+--------
+The task is to say, for every video frame, who has the ball: H (home team), A (away team), D (dead
+ball, play stopped), or X outside the two halves. This file does it with no machine learning, in
+three steps:
 
-  1. Measure. For every frame: how close each team is to the ball, how fast the ball is moving, how
-     fast the players are moving, and whether the ball is off the pitch.
-  2. Give points. Each frame gives points to H, A and D, following the table below.
-  3. Pick the labels. The Viterbi algorithm finds the labels with the most points in total, when
-     every change of label costs points.
+  1. Measure. For every frame: how close each team is to the ball, how fast the ball and the
+     players move, and whether the ball is off the pitch.
+  2. Give points. Each frame gives points to H, A and D, by the table below. A frame where nobody
+     clearly has the ball gives no team any points.
+  3. Pick the labels. The Viterbi algorithm (best_labels) finds the run of labels with the most
+     points in total, where every change of label costs points.
+
+There is no training and no randomness, so the same data always gives the same file. It is the next
+step up from baseline.py, and possession_v2.py and possession_model.py build on its code.
 
     pip install -r requirements.txt          # numpy and pandas, nothing else
     python starter/possession_v1.py          # writes evaluation/results/possession_v1.csv
     python evaluation/validate_submission.py evaluation/results/possession_v1.csv
     python evaluation/run_evaluation.py --no-detail
 
-Expect a few minutes -- it streams 199319 lines of tracking.
+Expect a few minutes: it reads 199,319 lines of tracking.
 
 Who gets the points
 -------------------
@@ -27,28 +34,31 @@ Who gets the points
     Smart Tagging phase                                 a little, to the team the phase implies
     before a half's "Kick Off (Start)" tag              D
 
-Why every change costs points
------------------------------
-One odd frame cannot pay for a change, which removes the flicker baseline.py smooths with a window.
-A frame with no evidence earns nothing, so the current label carries on, which is how gaps in the
-ball tracking get filled. A quick deflection earns too little to pay, which matches CHALLENGE.md: a
-touch without control is not a change of possession. And because the algorithm sees the whole half
-at once, a change lands where the evidence flips rather than wherever a window happens to put it.
+Why every change of label costs points
+--------------------------------------
+- One odd frame cannot pay for a change, so the labels do not flicker. (baseline.py needs a
+  smoothing window for that.)
+- A frame with no evidence earns nothing, so the current label simply carries on. That is how the
+  gaps where the ball is missing from the tracking get filled.
+- A quick deflection earns too little to pay for two changes (there and back again). That matches
+  CHALLENGE.md: a touch without control is not a change of possession.
+- Viterbi sees the whole half at once, so a change lands where the evidence flips, not wherever a
+  smoothing window happens to put it.
 
-What the values are
--------------------
-Every value under Params is a starting guess from football reasoning. None was chosen by looking at
-a ground truth and none should be: the public five minutes are not a tuning set (RULES.md). Better
-values should come from other matches. No frame number of this match is written anywhere in this
-file either, because RULES.md rules out constants tied to specific frames of the game.
+Why these values
+----------------
+Every value under Params is a starting guess from football common sense. None was chosen by looking
+at a ground truth, and none should be: the public five minutes are not a tuning set (RULES.md).
+possession_v2.py tunes its values on other matches instead. No frame number of this match is
+written anywhere in this file either, because RULES.md rules out constants tied to specific frames.
 
 Known limits
 ------------
-  - A goalkeeper holding the ball while everyone walks looks like a dead ball.
-  - A ball being carried to a restart looks alive until it stops moving.
-  - A long stretch without the ball keeps the last team, right or wrong.
-  - The Team tag on a defending phase is read as the defending team, following the definitions in
-    OVERVIEW.md. That reading has not been checked against the data.
+- A goalkeeper holding the ball while everyone walks looks like a dead ball.
+- A ball being carried to a restart looks alive until it stops moving.
+- A long stretch without the ball keeps the last team, right or wrong.
+- The Team tag on a defending phase is read as the defending team, following the definitions in
+  OVERVIEW.md. That reading has not been checked against the data.
 """
 
 import argparse
@@ -73,8 +83,8 @@ DEAD = 2  # H and A are baseline's HOME and AWAY, so LABELS turns a state straig
 
 # Control. Full points with the ball this close to a player, none at the second distance, in metres.
 CONTROL_NEAR, CONTROL_FAR = 1.0, 4.0
-# How much faster than that player the ball may be moving, in m/s. Below the first it can be at their
-# feet; above the second it is flying past them.
+# How much faster than that player the ball may be moving, in m/s. Below the first it can be at
+# their feet; above the second it is flying past them.
 CARRIED_EXTRA, FLYING_EXTRA = 4.0, 10.0
 # Frames either side used to measure ball speed. Short, so a kick shows up at once.
 SPEED_LAG = 2
@@ -299,30 +309,42 @@ def tag_points(events, clubs, n_frames, blocks):
     return points
 
 
-def best_labels(points):
-    """The state for each frame with the most points in total, after paying COSTS. The Viterbi path.
+def best_labels(points, costs=COSTS):
+    """The best label for every frame of one half: the Viterbi path. Returns (n,) H, A or D codes.
 
-    When two answers score the same, the change is made as late as possible. Possession stays with
+    points is (n, 3): how much each frame argues for H, A and D. costs[a][b] is the price of a
+    change from label a to label b. The answer is the run of labels with the most points in total
+    once every change has paid its price. possession_v2.py and possession_model.py use this same
+    function with their own costs.
+
+    How it works, in plain words: go through the frames once. For each label, keep the best total
+    that any run of labels ending in that label could have by now, and note which label that run
+    had on the frame before. At the end, start from the best label on the last frame and follow
+    those notes backwards. This finds the best run without trying every possible one.
+
+    When two answers score the same, the change is made as late as possible: possession stays with
     the last team until the new one shows control, so a neutral stretch before a change belongs to
-    the old state. Plain lists, because small numpy arrays are slower in a loop this tight.
+    the old label. Plain lists, because small numpy arrays are slower in a loop this tight.
     """
     rows = points.tolist()
-    states = range(len(COSTS))
-    score = rows[0]
-    came_from = [None] * len(rows)
+    states = range(len(costs))
+    score = rows[0]  # best total so far for a run ending in each label
+    came_from = [None] * len(rows)  # for each frame and label: the label on the frame before
 
     for frame in range(1, len(rows)):
-        previous, score = score, [0.0] * len(COSTS)
+        previous, score = score, [0.0] * len(costs)
         origins = []
         for state in states:
+            # Staying in the same label is free; arriving from another one pays the change.
             best, origin = previous[state], state
             for other in states:
-                if other != state and previous[other] - COSTS[other][state] >= best - TIE:
-                    best, origin = previous[other] - COSTS[other][state], other
+                if other != state and previous[other] - costs[other][state] >= best - TIE:
+                    best, origin = previous[other] - costs[other][state], other
             score[state] = best + rows[frame][state]
             origins.append(origin)
         came_from[frame] = origins
 
+    # Walk back from the best label on the last frame.
     path = np.zeros(len(rows), dtype=np.int8)
     path[-1] = int(np.argmax(score))
     for frame in range(len(rows) - 1, 0, -1):

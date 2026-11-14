@@ -1,64 +1,77 @@
-"""Possession model: LightGBM predicts H, A or D for every frame, then Viterbi picks the labels.
+"""Possession model: our submission. Two LightGBM models and Viterbi label every frame.
 
-The model was trained only on other matches (see train_possession_model.py) and is not trained here.
-This file reads the tracking, turns it into features, asks the saved model, and writes the file.
+In short
+--------
+For every frame of the Barcelona match this file says who has the ball (H, A or D, and X outside
+the two halves) and writes evaluation/results/possession_model.csv. Three steps:
+
+  1. Features. For every frame, 99 numbers that describe what the tracking shows: where each team
+     stands and how it moves, where the ball is and how fast it goes, how long the ball has been
+     missing from the tracking, what possession_v2's rules make of the frame, and where the players
+     stand at restarts (throw-ins, corners, kick-offs).
+  2. Two models. The first LightGBM model reads the features and gives the chance of H, A and D on
+     every frame. The second, smaller one (the "second look") reads the first one's answers around
+     each frame and corrects its usual mistakes.
+  3. Viterbi. The same algorithm as possession_v1 joins those chances into whole possessions:
+     every change of label costs points, so one odd frame cannot flip the answer.
+
+Both models were trained only on other matches (train_possession_model.py). Nothing is trained or
+tuned here, and nothing was ever tuned on this match.
 
     pip install -r requirements-model.txt
     python starter/possession_model.py       # writes evaluation/results/possession_model.csv
     python evaluation/validate_submission.py evaluation/results/possession_model.csv
     python evaluation/run_evaluation.py --no-detail
 
-Expect a few minutes. It uses Python 3.11, because that is what the model was trained and tested on.
+Expect a few minutes. Use Python 3.11, which the models were trained and tested on.
 
-Why a model at all
-------------------
-possession_v2 can only use the ball, so on the 41% of graded frames without one it has no evidence.
-The features here add what is still visible then: how each team is shaped and moving, how long the
-ball has been gone, where it was before and after the gap, and where the players stand when play
-restarts: someone at a touchline for a throw-in or at a corner flag for a corner, players in the
-box, both teams in their own halves for a kick-off. possession_v2's own evidence goes in as features
-too, so the model starts from what the rules already know.
+Why a model, and not only rules
+-------------------------------
+possession_v2's rules can only use the ball, so on the 41% of graded frames where the ball is
+missing from the tracking they have no evidence at all. A model can still use what is visible then:
+how each team is shaped and moving, how long the ball has been gone, where it was before and after
+the gap, and where the players stand when play restarts: someone at a touchline for a throw-in or
+at a corner flag for a corner, players in the box, both teams in their own halves for a kick-off.
+possession_v2's own evidence goes in as features too, so the model starts from what the rules
+already know.
+
+Why LightGBM
+------------
+The features are a big table of numbers with many gaps (NaN wherever the ball or a player is not
+tracked). LightGBM learns fast from large tables, handles missing values without any filling-in,
+and can be made deterministic, so training it again gives exactly the same model.
+
+Why a second look
+-----------------
+The first model judges one frame at a time and keeps making the same kinds of mistake: a flicker to
+the other team for a moment, a change of team drawn a little late. The second look reads the first
+model's answers up to 2 s either way, and how long its pick and its Viterbi labels have held and
+will hold, so it can see those patterns and correct them. It learned from the first model's answers
+on matches that model had not seen, so it learned the first model's real mistakes.
 
 Why Viterbi stays
 -----------------
-The model judges one frame at a time, helped by features that look a few seconds either way, so its
-answers can still flicker. Viterbi joins them into whole possessions, which is what spellF1 scores.
-Its costs are chosen on predictions for matches the model did not train on, because a model is
-over-confident on its own training data.
+Even after the second look the answers can flicker, and spellF1 scores whole possessions, not single
+frames. Viterbi's points are the log of the probabilities, so the run of labels it picks is the most
+likely one once each change of label has paid its cost. The costs were chosen on matches the models
+had not trained on, because a model is over-confident on its own training data.
 
-Where a change of team is likely
---------------------------------
-With one switch cost, every change of team needs the same evidence, so a cost low enough to catch
-the quick real changes also lets false ones through in a scramble. When the settings name a change
-model, a second LightGBM model gives the chance that the ball changes team near each frame, and a
-change costs less where that chance is high and more where it is low. Without one, every change
-costs the same, as before.
+Why the two teams are treated alike
+-----------------------------------
+Every half is turned so the home team attacks towards larger x (worked out from where each team's
+deepest players stand), so the model never has to learn which end is which. The model then predicts
+twice, once with the teams swapped, and averages the two. So H and A mean nothing on their own: the
+model judges only what each team is doing.
 
-A second look
--------------
-The first model keeps making the same kinds of mistake: a flicker to the other team for a moment, a
-change of team drawn a little late. When the settings name a second look, a smaller LightGBM model
-reads the first one's answers up to 2 s either way, and how long its pick and its Viterbi labels
-have held and will hold, and gives its own probabilities, which Viterbi joins with costs chosen for
-them.
-It learned from the first model's answers on matches that model had not seen, so it learned its real
-mistakes (train_possession_model.py, 'second'). Smart Tagging is weighed against the switch cost
-Viterbi actually pays, as before. Without a second look, nothing here changes.
-
-Why the teams are treated alike
--------------------------------
-Every half is turned so the home team attacks towards larger x, worked out from where each team's
-deepest players stand, so the model never has to learn which end is which. The model then predicts
-twice, once with the teams swapped, and averages. H and A therefore have no meaning of their own.
-
-Smart Tagging stays out of the model. These training matches have none, and tags invented for them
-would teach it to trust them too much. It is added at the Viterbi step with the same weight relative
-to a team change as in possession_v2.
+Why Smart Tagging stays out of the models
+-----------------------------------------
+The training matches have no Smart Tagging, and tags invented for them would teach the models to
+trust tags too much. So the tags are added only at the Viterbi step, weighed against the cost of a
+change of team the same way as in possession_v2.
 """
 
 import argparse
 import json
-import math
 import os
 import sys
 
@@ -74,18 +87,20 @@ from baseline import (AWAY, FIELD_SEP, GROUP_SEP, HOME, LABELS, MISSING, RESULTS
                       team_names, team_of_each_track, write_submission)
 from games import GAME, GAMES, half_video_blocks, require, source_frames  # noqa: E402
 from load_smart_tagging import load as load_smart_tagging  # noqa: E402
-from possession_v1 import (DEAD, FPS, PLAUSIBLE_SPEED, TIE, ball_speed, ramp,  # noqa: E402
-                           rolling_mean, tag_points)
+from possession_v1 import (DEAD, FPS, PLAUSIBLE_SPEED, ball_speed, ramp, rolling_mean,  # noqa: E402
+                           tag_points)
+from possession_v1 import best_labels as viterbi  # noqa: E402
 
 # Params
 OUT_NAME = "possession_model.csv"
+# The trained first model, and its settings: costs, feature names, and which second look to use.
 MODEL_PATH = os.path.join(ROOT, "models", "possession_lgbm.txt")
 SETTINGS_PATH = os.path.join(ROOT, "models", "possession_lgbm.json")
 SMALLEST_PROBABILITY = 1e-4  # so that one frame can never cost more than a few points
+# The restart clues (restart_features).
 BOX_DEPTH, BOX_HALF_WIDTH = 16.5, 20.16  # metres: the penalty box, from its goal line and middle
 RESTART_WINDOW = 50  # frames, 2 s: how near the touchline and a corner flag before and after
-CHANGE_FILE = "possession_change.txt"  # the change model, kept beside the settings that use it
-LOWEST_SWITCH = 1.0  # a change of team never costs less, however sure the change model is
+# The second look (second_features).
 SECOND_FILE = "possession_second.txt"  # the second look, kept beside the settings that use it
 SECOND_OFFSETS = (-50, -25, -12, -6, 6, 12, 25, 50)  # frames: 2, 1, 0.5 and 0.25 s either way
 SECOND_WINDOWS = (12, 25, 50, 125)  # frames averaged before and after
@@ -191,7 +206,10 @@ def restart_features(x, y, tracked, team, pitch):
 def frame_features(ball, xy, speed, team, pitch):
     """(n, n_features) float32 for one half, and the feature names. team is (n, p), 0 or 1.
 
-    The names end in _h and _a for the two teams, so swapping team gives the swapped features.
+    In order: each team's shape, movement and distance to the ball; the ball itself; what
+    possession_v2's rules make of the frame; the gap in the ball tracking the frame sits in; the
+    same evidence averaged over windows before and after; and last, the restart clues. Names ending
+    in _h and _a belong to one team each, so swapping team gives the swapped features.
     """
     length, width = pitch
     ball, xy = face_the_same_way(ball, xy, team, pitch)
@@ -322,13 +340,17 @@ def frame_features(ball, xy, speed, team, pitch):
 
 
 def team_features(ball, xy, speed, team, pitch):
-    """(direct, swapped): the features for one half, as it is and with the teams swapped."""
+    """(direct, swapped): the features for one half, as it is and with the teams swapped.
+
+    The model is asked both ways round and the two answers are averaged (points_from), so it judges
+    each team by what that team does, never by whether it is the home or the away side."""
     return (frame_features(ball, xy, speed, team, pitch)[0],
             frame_features(ball, xy, speed, 1 - team, pitch)[0])
 
 
 def points_from(booster, direct, swapped):
     """(n, 3) log-probabilities of H, A and D, averaged over swapping the teams."""
+    # The swapped answer's H and A columns are swapped back before the two are averaged.
     average = (booster.predict(direct) + booster.predict(swapped)[:, [AWAY, HOME, DEAD]]) / 2.0
     return np.log(np.clip(average, SMALLEST_PROBABILITY, 1.0))
 
@@ -338,18 +360,13 @@ def predict_points(booster, ball, xy, speed, team, pitch):
     return points_from(booster, *team_features(ball, xy, speed, team, pitch))
 
 
-def change_from(change_booster, direct, swapped):
-    """(n,) the chance that the ball changes team near each frame, averaged over swapping the teams,
-    which does not change what a change is."""
-    return (change_booster.predict(direct) + change_booster.predict(swapped)) / 2.0
-
-
-def switch_by_frame(chance, settings):
-    """The cost of a change of team into each frame: switch_cost where the change model's chance is
-    its training average, less where it is higher and more where it is lower."""
-    chance = np.clip(chance, SMALLEST_PROBABILITY, 1.0 - SMALLEST_PROBABILITY)
-    surprise = math.log(settings["change_rate"]) - np.log(chance)
-    return np.maximum(LOWEST_SWITCH, settings["switch_cost"] + settings["change_slope"] * surprise)
+def check_feature_count(booster, features):
+    """Stop with a clear message if the saved model reads a different number of features than this
+    code makes. That happens when the features changed but the model was not trained again."""
+    if features.shape[1] != booster.num_feature():
+        raise ValueError("the saved model reads {} features, but this code makes {}: train it "
+                         "again (see train_possession_model.py)".format(booster.num_feature(),
+                                                                        features.shape[1]))
 
 
 def shifted(values, offset):
@@ -422,40 +439,10 @@ def second_look(second_booster, points, first_costs):
     return np.log(np.clip(average, SMALLEST_PROBABILITY, 1.0))
 
 
-def best_labels(points, costs, switches=None):
-    """The state for each frame with the most points in total, after paying costs. The Viterbi path.
-
-    The same as possession_v2.best_labels, with the costs passed in, because they depend on the
-    model that produced the points. On a tie a change is made as late as possible. switches, if
-    given, is the cost of a change of team into each frame, in place of the one in costs.
-    """
-    rows = points.tolist()
-    by_frame = None if switches is None else switches.tolist()
-    states = range(len(costs))
-    score = rows[0]
-    came_from = [None] * len(rows)
-    table = costs
-
-    for frame in range(1, len(rows)):
-        if by_frame is not None:
-            switch = by_frame[frame]
-            table = ((0.0, switch, costs[0][2]), (switch, 0.0, costs[1][2]), costs[2])
-        previous, score = score, [0.0] * len(costs)
-        origins = []
-        for state in states:
-            best, origin = previous[state], state
-            for other in states:
-                if other != state and previous[other] - table[other][state] >= best - TIE:
-                    best, origin = previous[other] - table[other][state], other
-            score[state] = best + rows[frame][state]
-            origins.append(origin)
-        came_from[frame] = origins
-
-    path = np.zeros(len(rows), dtype=np.int8)
-    path[-1] = int(np.argmax(score))
-    for frame in range(len(rows) - 1, 0, -1):
-        path[frame - 1] = came_from[frame][path[frame]]
-    return path
+def best_labels(points, costs):
+    """The Viterbi path for one half (possession_v1.best_labels), with the costs passed in, because
+    the right costs depend on the model that made the points: they come from its settings."""
+    return viterbi(points, costs)
 
 
 def cost_table(switch, stop, restart):
@@ -509,17 +496,6 @@ def load_model(model_path=MODEL_PATH, settings_path=SETTINGS_PATH):
     return lightgbm.Booster(model_file=model_path), settings
 
 
-def load_change_model(settings, settings_path=SETTINGS_PATH):
-    """The change model these settings use, kept beside them, or None if they use none."""
-    if not settings.get("change_model"):
-        return None
-    path = os.path.join(os.path.dirname(settings_path), settings["change_model"])
-    if not os.path.isfile(path):
-        raise IOError("the settings at {} use {}, which is missing".format(settings_path, path))
-    import lightgbm
-    return lightgbm.Booster(model_file=path)
-
-
 def load_second_model(settings, settings_path=SETTINGS_PATH):
     """The second look these settings name, kept beside them, or None if they name none."""
     if not settings.get("second_model"):
@@ -532,21 +508,20 @@ def load_second_model(settings, settings_path=SETTINGS_PATH):
 
 
 def build(game=GAME, data_dir=None):
-    """Labels for the whole video. X outside the two halves, where nothing is graded."""
+    """Labels for the whole video: H, A or D in the two halves, X outside them (never graded)."""
     meta_path, raw_path = require(["atd_meta", "atd_raw"], game, data_dir)
     n_frames = source_frames("tactical", game)
     pitch = GAMES[game]["pitch"]
     blocks = half_video_blocks(game)
+
+    # The two models and their Viterbi costs. The second look reads the first model's answers with
+    # the first model's own costs, and its own answers are joined with the costs chosen for it.
     booster, settings = load_model()
-    change_booster = load_change_model(settings)
     second_booster = load_second_model(settings)
     first_costs = cost_table(settings["switch_cost"], settings["stop_cost"],
                              settings["restart_cost"])
     costs = first_costs
     if second_booster is not None:
-        if change_booster is not None:
-            raise ValueError("the settings name both a change model and a second look, which were "
-                             "never trained together")
         chosen = settings["second_costs"]
         costs = cost_table(chosen["switch"], chosen["stop"], chosen["restart"])
         print("with the second look, costs {:g} {:g} {:g}".format(
@@ -559,8 +534,11 @@ def build(game=GAME, data_dir=None):
     graded = np.concatenate([speed[first:last + 1].ravel() for _, first, last in blocks])
     if (np.isnan(graded).all()
             or not PLAUSIBLE_SPEED[0] <= np.nanmedian(graded) <= PLAUSIBLE_SPEED[1]):
-        print("WARNING: player speeds do not look like m/s, so the dead-ball features are unreliable")
+        print("WARNING: player speeds do not look like m/s, so the dead-ball features are "
+              "unreliable")
 
+    # Smart Tagging joins only at the Viterbi step. It is weighed against the switch cost Viterbi
+    # pays here exactly as possession_v2 weighs it against its own (see the module docstring).
     tags = tag_points(load_smart_tagging(game, data_dir), team_names(meta_path), n_frames, blocks)
     tag_scale = costs[HOME][AWAY] / possession_v2.SWITCH_COST  # the switch cost Viterbi pays here
 
@@ -569,15 +547,16 @@ def build(game=GAME, data_dir=None):
         print("predicting half {} ...".format(half))
         stop = last + 1
         team = np.broadcast_to(team_of_track, (stop - first, len(team_of_track)))
+        # Step 1: the features, as they are and with the teams swapped.
         direct, swapped = team_features(ball[first:stop], xy[first:stop].astype(np.float64),
                                         speed[first:stop].astype(np.float64), team, pitch)
+        check_feature_count(booster, direct)
+        # Step 2: the first model, then the second look.
         points = points_from(booster, direct, swapped)
         if second_booster is not None:
             points = second_look(second_booster, points, first_costs).astype(np.float32)
-        switches = (None if change_booster is None
-                    else switch_by_frame(change_from(change_booster, direct, swapped), settings))
-        labels[first:stop] = LABELS[best_labels(points + tag_scale * tags[first:stop], costs,
-                                                switches)]
+        # Step 3: Viterbi joins the frames into possessions.
+        labels[first:stop] = LABELS[best_labels(points + tag_scale * tags[first:stop], costs)]
     return labels
 
 

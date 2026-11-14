@@ -1,9 +1,8 @@
 {
   "switch_cost": 12.0,
   "stop_cost": 64.0,
-  "restart_cost": 32.0,
-  "rounds": 582,
-  "touch_s": 0.0,
+  "restart_cost": 64.0,
+  "rounds": 591,
   "trained_on": [
     "J03WMX",
     "J03WOH",
@@ -118,10 +117,10 @@
     "both_own_half"
   ],
   "second_model": "possession_second.txt",
-  "second_rounds": 181,
+  "second_rounds": 187,
   "second_costs": {
-    "switch": 12.0,
-    "stop": 8.0,
+    "switch": 8.0,
+    "stop": 16.0,
     "restart": 32.0
   }
 }

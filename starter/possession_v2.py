@@ -1,38 +1,42 @@
 """Possession v2: possession_v1 with sharper evidence of who has the ball, tuned on other matches.
 
-The same three steps as possession_v1: measure, give points, pick the labels with Viterbi. Reading
-the tracking, the dead-ball points and the Smart Tagging points are reused from it unchanged. What
-is new:
+In short
+--------
+The same three steps as possession_v1 (measure, give points, pick the labels with Viterbi), and the
+same code for reading the tracking, the dead-ball points and the Smart Tagging. Two things are new:
 
-  - Only a clear gap between the teams counts. The nearer team has to be nearer by CLEAR_MARGIN to
-    earn full points, so a duel earns little and a clean take-over shows up at once.
-  - Touches count. The ball suddenly changing velocity next to a player means that player touched
-    it, which catches a one-touch interception that never looks like control.
+  - Only a clear gap between the teams counts. The nearer team has to be nearer by CLEAR_MARGIN
+    metres to earn full points, so a duel earns little and a clean take-over shows up at once.
+  - Touches count. When the ball suddenly changes speed or direction next to a player, that player
+    touched it. This catches a one-touch interception, which never looks like control.
 
-The cost of a team change is the same as in possession_v1: the gain comes from better evidence.
+The cost of a change of label is the same as in possession_v1: the gain comes from better evidence.
+possession_model.py uses this file's evidence (frame_points, touch_strength) as some of its
+features, so the model starts from what these rules already know.
 
     pip install -r requirements.txt          # numpy and pandas, nothing else
     python starter/possession_v2.py          # writes evaluation/results/possession_v2.csv
     python evaluation/validate_submission.py evaluation/results/possession_v2.csv
     python evaluation/run_evaluation.py --no-detail
 
-Expect a few minutes -- it streams 199319 lines of tracking.
+Expect a few minutes: it reads 199,319 lines of tracking.
 
 Where the values come from
 --------------------------
 Every value under Params was picked on four public IDSSE matches (J03WMX, J03WOH, J03WPY, J03WQQ)
 and checked on three others (J03WN1, J03WOY, J03WR9). None came from this competition's ground
-truth, public or private. Those labels change team far more often than CHALLENGE.md's definition
-suggests, and a lower cost scored higher on them but lost ground when brief touches were not
-counted, which a test on the other three is what showed. So the cost was chosen on the four tuning
-matches by its average across four versions of the labels: as given, and with spells under 2, 5 and
-8 seconds handed back to the rival on both sides. A setting that only suits one of those would be a
-bet on how the real ground truth was made.
+truth, public or private. starter/test_on_other_matches.py reproduces the check.
 
-starter/test_on_other_matches.py reproduces the check. The dead-ball values stay as they are in
-possession_v1, because tuning them here would mostly fit the simulated damage rather than football.
+Why the cost was chosen on four versions of the labels: the IDSSE labels change team far more often
+than CHALLENGE.md's definition suggests. A lower cost scored higher on them as given, but lost
+ground when brief touches were not counted, as the test on the other three matches showed. So the
+cost was chosen by its average over four versions of the labels: as given, and with spells under 2,
+5 and 8 seconds handed back to the rival on both sides. A setting that suits only one of them would
+be a bet on how the real ground truth was made.
 
-No frame number of this match is written anywhere in this file, for the reason RULES.md gives.
+The dead-ball values stay as they are in possession_v1, because tuning them here would mostly fit
+the simulated damage rather than football. No frame number of this match is written anywhere in
+this file, for the reason RULES.md gives.
 
 Known limits
 ------------
@@ -52,8 +56,9 @@ from baseline import (AWAY, HOME, LABELS, RESULTS_DIR, team_names,  # noqa: E402
                       team_of_each_track, write_submission)
 from games import GAME, GAMES, half_video_blocks, require, source_frames  # noqa: E402
 from load_smart_tagging import load as load_smart_tagging  # noqa: E402
-from possession_v1 import (DEAD, FPS, PLAUSIBLE_SPEED, TIE, ball_speed,  # noqa: E402
-                           dead_ball_points, ramp, read_tracking, tag_points)
+from possession_v1 import (DEAD, FPS, PLAUSIBLE_SPEED, ball_speed, dead_ball_points,  # noqa: E402
+                           ramp, read_tracking, tag_points)
+from possession_v1 import best_labels as viterbi  # noqa: E402
 
 # Params
 OUT_NAME = "possession_v2.csv"
@@ -129,33 +134,8 @@ def frame_points(ball, nearest, nearest_speed, crowd_speed, pitch):
 
 
 def best_labels(points):
-    """The state for each frame with the most points in total, after paying COSTS. The Viterbi path.
-
-    The same as possession_v1.best_labels with this file's costs. That file is kept exactly as it
-    is, so that its submission can still be regenerated.
-    """
-    rows = points.tolist()
-    states = range(len(COSTS))
-    score = rows[0]
-    came_from = [None] * len(rows)
-
-    for frame in range(1, len(rows)):
-        previous, score = score, [0.0] * len(COSTS)
-        origins = []
-        for state in states:
-            best, origin = previous[state], state
-            for other in states:
-                if other != state and previous[other] - COSTS[other][state] >= best - TIE:
-                    best, origin = previous[other] - COSTS[other][state], other
-            score[state] = best + rows[frame][state]
-            origins.append(origin)
-        came_from[frame] = origins
-
-    path = np.zeros(len(rows), dtype=np.int8)
-    path[-1] = int(np.argmax(score))
-    for frame in range(len(rows) - 1, 0, -1):
-        path[frame - 1] = came_from[frame][path[frame]]
-    return path
+    """The Viterbi path for one half with this file's COSTS (see possession_v1.best_labels)."""
+    return viterbi(points, COSTS)
 
 
 def build(game=GAME, data_dir=None):

@@ -1,5 +1,20 @@
 # More than a Hack 2027 — Phase 1: Ball Possession
 
+> **Our submission.** `starter/possession_model.py` labels every frame with two LightGBM models
+> and Viterbi, trained only on seven public IDSSE matches. Public 5 minutes: spellF1 **0.676**,
+> macroF1 **0.871**. How it works, what we tried and how to reproduce it:
+> **[TECHNICAL_REPORT.md](TECHNICAL_REPORT.md)**.
+>
+> ```bash
+> pip install -r requirements-model.txt     # Python 3.11
+> # put the match data in ./data (see "Getting the data" below)
+> python starter/possession_model.py        # -> evaluation/results/possession_model.csv
+> python evaluation/validate_submission.py evaluation/results/possession_model.csv
+> ```
+>
+> The trained models are in `models/`. To train them again (about 45 minutes), see section 7 of
+> the technical report. Everything below this box is the organisers' original README.
+
 **Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)
 and the [Mobile World Capital Barcelona](https://www.mwcbarcelona.com)**, at the Talent Arena in Barcelona.
 

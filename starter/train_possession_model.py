@@ -1,105 +1,87 @@
-"""Train the possession model on public matches, choose its Viterbi costs, and test it.
+"""Train the possession model on other matches, choose its settings, and test it honestly.
 
-    python starter/train_possession_model.py features   # damaged copies of the tuning matches
-    python starter/train_possession_model.py cv         # hold out each tuning match in turn
-    python starter/train_possession_model.py costs      # choose the costs on those predictions
-    python starter/train_possession_model.py second     # the second look, on the same predictions
-    python starter/train_possession_model.py final      # train on all four, kept with the work files
-    python starter/train_possession_model.py test       # score that model on the three held-back
+In short
+--------
+possession_model.py needs two trained LightGBM models and a few settings. This file makes them from
+the seven public IDSSE matches (see test_on_other_matches.py), and from nothing of the competition's
+match. The work is split into stages, run one after the other:
+
+    python starter/train_possession_model.py features   # 1. training rows from damaged copies
+    python starter/train_possession_model.py cv         # 2. first model, each match left out
+    python starter/train_possession_model.py costs      # 3. Viterbi costs for the first model
+    python starter/train_possession_model.py second     # 4. the second look, and its costs
+    python starter/train_possession_model.py final      # 5. both models, on all training matches
+    python starter/train_possession_model.py test       # 6. score them on the held-back matches
+
+Without --all, stages 1-5 use the four tuning matches, and 'test' scores the result on the three
+held-back ones. Those chose nothing, so 'test' shows honestly whether the method works. With --all,
+the same stages use all seven matches, and 'final --all' writes the model to submit into models/:
 
     python starter/train_possession_model.py features --all    # then cv, costs, second, final --all
 
-Add --touch 2 to every stage to try labels without brief touches (see below). Each version of the
-labels keeps its own work files and models, so the two can be tested side by side.
+Each stage keeps its work in a folder beside the repository (WORK_DIR, or WORK_DIR_ALL with --all),
+so a later stage can be run again without redoing the earlier ones. Expect about 20 minutes for
+stages 1-5, about 45 with --all, and about 20 for 'test'. Every step is deterministic: run again,
+it gives exactly the same model.
 
-Add --change to cv, costs, final and test for the change model (see below). It uses the features
-and the first model's 'cv' from the runs without it, and keeps its own costs and models:
+Why other matches, and why their tracking is damaged first
+-----------------------------------------------------------
+RULES.md allows training on other matches in any amount, but the five public minutes of this one
+are only a check. The IDSSE tracking is clean, though, and the competition's is not, so every
+training match is first damaged to break the way the competition's tracking breaks
+(test_on_other_matches.damage). Each of the three copies of a match gets its own random damage,
+drawn from ranges around the measured settings, so the model learns football rather than one
+pattern of damage (such as 'a missing ball always means a stoppage'). 'test' also scores kinds of
+damage outside the training mix.
 
-    python starter/train_possession_model.py cv --change      # the change model, each match left out
-    python starter/train_possession_model.py costs --change   # the costs again, with its slope
-    python starter/train_possession_model.py final --change
-    python starter/train_possession_model.py test --change    # 'model, one cost' is the same model
-                                                              # with the costs chosen without it
+Why the matches are split whole
+-------------------------------
+Frames of one match are so alike that a random split of frames would report a score far above what
+the model can really do. So whole matches are left out. 'cv' trains without each tuning match in
+turn and predicts the one left out ("out-of-fold" answers), and every later choice is made on
+those. J03WN1, J03WOY and J03WR9 are never used to train or choose anything, except with --all.
 
-None of the competition's data is read here. Training uses IDSSE matches only, as described in
-test_on_other_matches.py, so the only labels the model has seen are from other games (RULES.md).
-
-The split is by match. Frames from one match are so alike that a random split would report a score
-far above what the model can really do. J03WN1, J03WOY and J03WR9 are never used for training or for
-choosing anything in this file, except with --all.
-
---all makes the model to submit, once 'test' has shown the method works: the same stages on all
-seven matches, each left out in turn to choose the rounds and costs, with its files kept apart. Only
-'final --all' writes to models/, and 'test' never reads from there, so a model that has seen the
-held-back matches is never scored on them.
+What is chosen, and how
+-----------------------
+- How many trees: 'cv' stops adding trees once the match left out stops improving (early
+  stopping), and 'final' uses the average over the folds.
+- The Viterbi costs: 'costs' tries a grid of costs for a change of team (switch), for the ball
+  going dead (stop) and for play restarting (restart) on the out-of-fold answers, and keeps the
+  best spellF1 on the labels as given. Costs within TIED_WITHIN of the best count as tied, and the
+  tie goes to whichever does best over all four versions of the labels (LEVELS), because nobody
+  knows how the real answers treat brief touches.
+- The second look: 'second' trains it the same way, each match left out in turn, on the first
+  model's out-of-fold answers, and chooses its own costs by the same search.
 
 Which labels the model learns
 -----------------------------
-By default, the labels as given. They are made the way CHALLENGE.md says the Barcelona answers are:
-read frame by frame from the tracking's ball owner (BallPossession here), with nothing smoothed.
-With --touch S, a spell under S seconds between two of the rival's is handed back to the rival
-before training, as in the 'S s' columns of 'test'. At 2 s that relabels about 2% of the live frames
-and removes about a quarter of the possessions. Tried with --touch 2, it scored lower on the
-held-back matches as given (0.539 against 0.594) and at 2 s (0.646 against 0.660). It scored higher
-at 5 and 8 s mainly because it makes fewer possessions: with a higher switch cost, the model trained
-on the labels as given comes within about 0.01 of it there on the tuning matches. The costs are
-chosen on the same version of the labels the model learns, and never on what the public five
-minutes look like (RULES.md).
+The labels as given: read frame by frame from the tracking's ball owner (BallPossession), with
+nothing smoothed, the way CHALLENGE.md says the Barcelona answers were made. 'test' also scores
+with brief touches not counted: spells under 2, 5 or 8 s between two of the rival's are handed back
+to the rival (the 2s, 5s and 8s columns).
 
-The change model
-----------------
-LightGBM again, on the same rows and features, answering only whether a change of team in play, H
-to A or A to H, happens within CHANGE_NEAR frames. Viterbi then charges switch_cost for a change
-where that chance is its training average, less where it is higher and more where it is lower, as
-much as change_slope says. A slope of 0 is the same as having no change model, and 'costs' tries
-it, so the costs can always fall back to one switch cost for every frame.
+What we kept, and what it gained
+--------------------------------
+Every idea was tested the same way, with its rule set before running: first on the tuning matches,
+each left out in turn, and only if it passed there, once on the held-back matches. These passed:
+- The second look: on the held-back matches, +0.007 spellF1 as given and +0.008 to +0.011 at 2, 5
+  and 8 s (measured before the restart clues were added).
+- The restart clues (restart_features in possession_model.py): +0.008 as given and +0.006, +0.005
+  and +0.004 at 2, 5 and 8 s on the tuning matches; on the held-back matches, over the default
+  damage and three harder kinds, +0.014 as given and +0.009, +0.005 and +0.005.
 
-Tried on the held-back matches, it made no difference: 0.594 as given with it and without it, and
-up to 0.006 lower on the other versions. It sees the same features as the first model, so it
-probably has little to add, and the model to submit does not use it.
-
-The second look
----------------
-A second, smaller LightGBM model that reads the first model's answers instead of the tracking: its
-three log-probabilities at each frame, its team edge and dead-ball chance up to 2 s either way and
-averaged over windows before and after, the lowest and highest edge nearby, and how long its pick
-and its Viterbi labels have held and will hold, with what comes before and after. It learns from the
-out-of-fold answers 'cv' saved, so it learns the mistakes the first model makes on a match it has
-not seen, such as a flicker to the other team or a change drawn late. 'second' trains it without
-each training match in turn, as 'cv' does, and chooses its own costs on its answers for the match
-left out, by the same search as 'costs'.
-
-With the first model as it was before the clues to restarts below, it gained 0.005 as given and
-0.011 to 0.012 at 2, 5 and 8 s on the tuning matches. On the held-back matches under the default
-damage, which chose nothing, it gained 0.007 as given, better on each of the three, and 0.008 to
-0.011 at 2, 5 and 8 s. 'final' adds it beside the first model when 'second' has been run, and 'test'
-scores it as '+ second look'. The first model's own costs stay in switch_cost, stop_cost and
-restart_cost, and the second look's are kept apart in second_costs, which possession_model.py uses
-whenever the settings name a second look.
-
-Clues to restarts
------------------
-After the ball goes out, the team that restarts play has it, and where the players stand often
-shows which team that is even when the ball itself is lost: a throw-in is taken at a touchline, a
-corner at a corner flag, a free kick into the box with players waiting in it, and a kick-off with
-both teams in their own halves. The first model's last 13 features are for these
-(restart_features in possession_model.py).
-
-They were tested before they were added, with the rule set before running, and with the costs and
-the second look made again as 'costs' and 'second' make them. On the tuning matches, each left out
-in turn, the whole model gained 0.008 as given and 0.006, 0.005 and 0.004 at 2, 5 and 8 s. On the
-held-back matches, over the default damage and three harder kinds from 'test' (ball lost twice as
-often, found half as fast, many wrong-team tracks), it gained 0.014 as given and 0.009, 0.005 and
-0.005 at 2, 5 and 8 s: 0.011 as given under the default damage, and most, 0.024, when the ball is
-found slowly.
-
-Why every copy is damaged differently
--------------------------------------
-The damage copies what measure_tracking.py measured on the ATD, but that is one match, and some
-errors it cannot measure at all, so a model trained on one fixed kind of damage could learn that
-damage rather than football. Each training copy draws its own damage from ranges around the measured
-settings, so the model cannot lean on any one pattern, such as a missing ball always meaning a
-stoppage. The 'test' stage also scores kinds of damage outside the training mix.
+What we tried and dropped
+-------------------------
+- Learning labels with brief touches handed back: lower on the held-back matches as given (0.539
+  against 0.594) and at 2 s (0.646 against 0.660).
+- A third model that makes a change of team cheaper where one looks likely: no gain (0.594 as
+  given, with it and without it).
+- Averaging models trained with several random seeds: +0.002, inside the noise.
+- Training again on the model's own confident answers (self-training): -0.001.
+- Facts about the tracking given to the second look: +0.004, under the bar of +0.005.
+- A third look, reading the second look's answers: -0.004.
+- Training the second look on more kinds of damage: -0.0004.
+- Clues for goal kicks and for free-kick walls: -0.006 and -0.001 on the tuning matches.
 """
 
 import argparse
@@ -122,21 +104,24 @@ import possession_v2  # noqa: E402
 import test_on_other_matches as other  # noqa: E402
 
 # Params
-TUNING = ("J03WMX", "J03WOH", "J03WPY", "J03WQQ")
-HELD_BACK = ("J03WN1", "J03WOY", "J03WR9")
+# The matches, by the last six characters of their IDSSE ids.
+TUNING = ("J03WMX", "J03WOH", "J03WPY", "J03WQQ")  # every choice is made on these
+HELD_BACK = ("J03WN1", "J03WOY", "J03WR9")  # only for the last, honest check in 'test'
 TRAIN = TUNING  # all seven with --all
 STEMS = {stem[-6:]: stem for stem in other.MATCHES}
+# Where the stages keep their work: beside the repository, so nothing large can be committed.
 WORK_DIR = os.path.join(other.DATA_DIR, "model_work")
 WORK_DIR_ALL = os.path.join(other.DATA_DIR, "model_work_all")
 
-COPIES_PER_MATCH = 3
-EVERY_NTH_FRAME = 5  # neighbouring frames say almost the same thing
+# The training rows.
+COPIES_PER_MATCH = 3  # damaged copies of each match, each one damaged differently
+EVERY_NTH_FRAME = 5  # neighbouring frames say almost the same thing, so one in five is enough
 TRAINING_SEED = 40
-CHECK_SEEDS = (11, 12)  # default damage, for comparing with possession_v2 when choosing costs
-N_PROCESSES = int(os.environ.get("N_PROCESSES", 8))
+CHECK_SEEDS = (11, 12)  # two copies of each match under the default damage, for choosing costs
+N_PROCESSES = 8  # training copies made at the same time
 
-# Drawn afresh for every training copy. (name in test_on_other_matches, lowest, highest) as
-# multiples of the measured setting there, then as plain values.
+# The damage of each training copy, drawn afresh for every copy: (name in test_on_other_matches,
+# lowest, highest), as multiples of the measured setting there, then as plain values.
 DAMAGE_SCALES = (("LOSS_RATE", 0.6, 1.6), ("LOSS_DEAD", 0.6, 1.6), ("FIND_RATE", 0.6, 1.6),
                  ("FIND_DEAD", 0.6, 1.6), ("GLITCH_RATE", 0.5, 2.0), ("BALL_DRIFT_M", 0.5, 1.5),
                  ("BALL_SMOOTH_FRAMES", 0.5, 1.5), ("PLAYER_SMOOTH_FRAMES", 0.5, 1.5),
@@ -154,50 +139,38 @@ SITUATION_FACTORS = ("LOSS_BY_SPEED", "FIND_BY_SPEED", "LOSS_ACROSS", "LOSS_ALON
 SITUATION_POWER = (0.6, 1.4)
 SIDED = ("LOSS_ACROSS", "LOSS_ALONG")
 
+# The first model. Many small steps (learning_rate); leaves that need at least 500 rows each, so no
+# leaf can learn one moment of one match; and every tree sees a random 70% of the rows and of the
+# features, so the model leans on many features rather than a few. A fixed seed, a fixed number of
+# threads and 'deterministic' make training again give exactly the same model.
 LIGHTGBM = {"objective": "multiclass", "num_class": 3, "metric": "multi_logloss",
             "learning_rate": 0.05, "num_leaves": 63, "min_data_in_leaf": 500,
             "feature_fraction": 0.7, "bagging_fraction": 0.7, "bagging_freq": 1,
             "lambda_l2": 5.0, "seed": 2027, "deterministic": True, "force_row_wise": True,
-            "num_threads": int(os.environ.get("LGBM_THREADS", 16)), "verbosity": -1}
-MOST_ROUNDS = 800
-PATIENCE = 40
+            "num_threads": 16, "verbosity": -1}
+MOST_ROUNDS = 800  # the most trees 'cv' tries
+PATIENCE = 40  # 'cv' stops once the match left out has not improved for this many trees
 LOG_EVERY = 25
 
+# The second look: the same settings with smaller trees, because it reads fewer features (51), all
+# of one kind (the first model's answers).
+SECOND_LIGHTGBM = dict(LIGHTGBM, num_leaves=31)
+
+# The Viterbi costs that 'costs' and 'second' try: where the search starts, what it tries in turn
+# (the switch cost again at the end, because its best value can move once the others are chosen),
+# and how it prints them: (name, width, decimals).
 SWITCH_COSTS = (4.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0, 64.0, 96.0)
 STOP_COSTS = (8.0, 16.0, 32.0, 64.0, 128.0)
 RESTART_COSTS = (8.0, 16.0, 32.0, 64.0, 128.0)
-# Costs closer than this to the best spellF1 on the chosen labels count as tied with it, and the tie
-# goes to whichever does best over all of LEVELS. 0.002 is about ten possessions out of the several
-# thousand in the check copies, far below what EVALUATION.md calls noise.
-TIED_WITHIN = 0.002
-LEVELS = (0.0, 2.0, 5.0, 8.0)  # seconds of brief touches not counted, 0 being the labels as given
-TOUCH_S = 0.0  # the one of LEVELS the model learns and the costs are chosen on, set with --touch
-
-CHANGE = False  # whether to use the change model, set with --change
-CHANGE_NEAR = 12  # frames either side of a change of team that count as near it, about 0.5 s
-CHANGE_LIGHTGBM = dict({key: value for key, value in LIGHTGBM.items() if key != "num_class"},
-                       objective="binary", metric="binary_logloss")
-SLOPES = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0)  # how far the change model moves the switch cost
-
-SECOND_LIGHTGBM = dict(LIGHTGBM, num_leaves=31)  # fewer features than the first, all of one kind
-
-# Where the costs search starts, what it tries in turn, and how it prints them: (name, width,
-# decimals). The change model adds its slope to these.
 START_COSTS = {"switch": 24.0, "stop": 32.0, "restart": 32.0}
 COST_SEARCH = (("switch", SWITCH_COSTS), ("stop", STOP_COSTS), ("restart", RESTART_COSTS),
                ("switch", SWITCH_COSTS))
 COST_COLUMNS = (("switch", 7, 0), ("stop", 6, 0), ("restart", 7, 0))
-# After the coarse grid, FINE_COSTS=1 walks each cost by these factors around the best so far,
-# repeating while it still improves, so the costs are not stuck on the grid's powers of two.
-FINE_COSTS = os.environ.get("FINE_COSTS") == "1"
-FINE_FACTORS = (0.6, 0.75, 0.875, 1.15, 1.33, 1.6)
-FINE_ROUNDS = 3
-# COST_LEVELS="2,5" chooses the costs on the mean spellF1 over those versions of the labels (seconds
-# of brief touches handed back) rather than on TOUCH_S alone. CHALLENGE.md says brief touches do
-# not count in the Barcelona answers, so these may sit nearer them than the labels as given.
-COST_LEVELS = tuple(float(v) for v in os.environ.get("COST_LEVELS", "").split(",") if v)
-# WORK_SUFFIX keeps a variant's costs, second look and model apart from the default work files.
-WORK_SUFFIX = os.environ.get("WORK_SUFFIX", "")
+# Costs closer than this to the best spellF1 on the labels as given count as tied with it, and the
+# tie goes to whichever does best over all of LEVELS. 0.002 is about ten possessions out of the
+# several thousand in the check copies, far below what EVALUATION.md calls noise.
+TIED_WITHIN = 0.002
+LEVELS = (0.0, 2.0, 5.0, 8.0)  # seconds of brief touches not counted, 0 being the labels as given
 
 
 def as_arrays(match):
@@ -205,30 +178,33 @@ def as_arrays(match):
     return match["ball"], match["xy"], match["speed"], match["team_of"]
 
 
-def labels_at(truth, touch_s):
-    """truth with spells under touch_s seconds between two of the rival's handed back."""
-    return other.absorb_touches(truth, touch_s) if touch_s else truth
+def labels_at(truth, seconds):
+    """truth with spells under `seconds` between two of the rival's handed back to the rival. With
+    0, the labels as given."""
+    return other.absorb_touches(truth, seconds) if seconds else truth
 
 
 def trial_paths():
-    """Where 'final' without --all keeps its model, the one 'test' scores."""
-    stem = "possession_lgbm_change" if CHANGE else "possession_lgbm"
-    return os.path.join(WORK_DIR, stem + ".txt"), os.path.join(WORK_DIR, stem + ".json")
+    """Where 'final' without --all keeps its model and settings: the ones 'test' scores."""
+    return (os.path.join(WORK_DIR, "possession_lgbm.txt"),
+            os.path.join(WORK_DIR, "possession_lgbm.json"))
 
 
 def costs_path():
-    """Where 'costs' keeps what it chose, apart for the change model."""
-    return os.path.join(WORK_DIR, "costs_change.json" if CHANGE else "costs.json")
+    """Where 'costs' keeps the first model's Viterbi costs."""
+    return os.path.join(WORK_DIR, "costs.json")
 
 
 def second_path():
-    """Where 'second' keeps what it chose."""
+    """Where 'second' keeps what it chose for the second look."""
     return os.path.join(WORK_DIR, "second.json")
 
 
+# Stage 1: features --------------------------------------------------------------------------------
+
 def randomised_damage(match, seed):
-    """test_on_other_matches.damage with its settings drawn from DAMAGE_SCALES, DAMAGE_VALUES and
-    SITUATION_POWER."""
+    """test_on_other_matches.damage with its settings drawn at random from DAMAGE_SCALES,
+    DAMAGE_VALUES and SITUATION_POWER, then put back as they were."""
     rng = np.random.RandomState(seed)
     names = ([name for name, _, _ in DAMAGE_SCALES + DAMAGE_VALUES]
              + [name for name in SITUATION_FACTORS])
@@ -252,11 +228,14 @@ def randomised_damage(match, seed):
 
 
 def training_copy(job):
-    """One damaged copy of one match as sampled feature rows, saved to disk. Teams both ways round.
+    """Make one damaged copy of one match into training rows, and save them to disk.
 
-    The folder and the labels come with the job, because the worker processes never see what the
-    command line changed."""
-    name, copy, work_dir, touch_s = job
+    Every EVERY_NTH_FRAME-th frame of each half becomes two rows: as it is, and with the two teams
+    swapped (its label H or A swapped with them). That doubles the rows and teaches the model that H
+    and A mean nothing on their own. job is (match, copy number, folder): the folder comes with the
+    job because the worker processes never see what the command line changed. A copy already on
+    disk is kept, so the stage can be stopped and started again."""
+    name, copy, work_dir = job
     path = os.path.join(work_dir, "train_{}_{}.npz".format(name, copy))
     if os.path.isfile(path):
         return path
@@ -265,16 +244,15 @@ def training_copy(job):
     seed = TRAINING_SEED + 100 * other.MATCHES.index(STEMS[name]) + copy
     broken = randomised_damage(match, seed)
     ball, xy, speed, team = as_arrays(broken)
-    targets = labels_at(match["truth"], touch_s)
     rows, labels = [], []
     for _, first, last in match["blocks"]:
         stop = last + 1
-        offset = (seed + first) % EVERY_NTH_FRAME
-        truth = targets[first:stop][offset::EVERY_NTH_FRAME]
+        offset = (seed + first) % EVERY_NTH_FRAME  # which frame in five, different for every copy
+        truth = match["truth"][first:stop][offset::EVERY_NTH_FRAME]
         for flip in (False, True):
             sides = 1 - team[first:stop] if flip else team[first:stop]
-            features, names = model.frame_features(ball[first:stop], xy[first:stop], speed[first:stop],
-                                                   sides, match["pitch"])
+            features, names = model.frame_features(ball[first:stop], xy[first:stop],
+                                                   speed[first:stop], sides, match["pitch"])
             rows.append(features[offset::EVERY_NTH_FRAME])
             labels.append(np.where(truth == pm.D, pm.D, 1 - truth) if flip else truth)
     np.savez(path, X=np.concatenate(rows), y=np.concatenate(labels), names=np.array(names))
@@ -282,8 +260,9 @@ def training_copy(job):
 
 
 def stage_features():
+    """Stage 1: the training rows of every damaged copy of every training match, several at once."""
     os.makedirs(WORK_DIR, exist_ok=True)
-    jobs = [(name, copy, WORK_DIR, TOUCH_S) for name in TRAIN for copy in range(COPIES_PER_MATCH)]
+    jobs = [(name, copy, WORK_DIR) for name in TRAIN for copy in range(COPIES_PER_MATCH)]
     start = time.time()
     with multiprocessing.get_context("spawn").Pool(N_PROCESSES) as pool:
         for count, path in enumerate(pool.imap_unordered(training_copy, jobs), start=1):
@@ -292,6 +271,7 @@ def stage_features():
 
 
 def load_rows(names):
+    """(X, y, feature names): the saved training rows of these matches, every copy, in order."""
     rows, labels, feature_names = [], [], None
     for name in names:
         for copy in range(COPIES_PER_MATCH):
@@ -302,53 +282,11 @@ def load_rows(names):
     return np.concatenate(rows), np.concatenate(labels), feature_names
 
 
-def near_change(truth):
-    """1 for the frames within CHANGE_NEAR of a change of team in play, H to A or A to H, else 0."""
-    in_play = (truth == pm.H) | (truth == pm.A)
-    changes = np.flatnonzero(in_play[1:] & in_play[:-1] & (truth[1:] != truth[:-1])) + 1
-    marks = np.zeros(len(truth) + 1)
-    np.add.at(marks, np.maximum(changes - CHANGE_NEAR, 0), 1.0)
-    np.add.at(marks, np.minimum(changes + CHANGE_NEAR + 1, len(truth)), -1.0)
-    return (np.cumsum(marks)[:-1] > 0.5).astype(np.float32)
-
-
-def row_frames(name, copy, blocks):
-    """(frame, swapped) behind each row training_copy saved for this copy, in the same order."""
-    seed = TRAINING_SEED + 100 * other.MATCHES.index(STEMS[name]) + copy
-    frames, swapped = [], []
-    for _, first, last in blocks:
-        picked = np.arange(first, last + 1)[(seed + first) % EVERY_NTH_FRAME::EVERY_NTH_FRAME]
-        for flip in (False, True):
-            frames.append(picked)
-            swapped.append(np.full(len(picked), flip))
-    return np.concatenate(frames), np.concatenate(swapped)
-
-
-def change_targets(names):
-    """For the rows load_rows gives for these matches, 1 near a change of team and 0 elsewhere.
-
-    The rows were saved without these, so their frames are worked out again, and checked against
-    the labels saved with them."""
-    out = []
-    for name in names:
-        match = other.load_match(STEMS[name], other.DATA_DIR)
-        truth = labels_at(match["truth"], TOUCH_S)
-        near = near_change(truth)
-        for copy in range(COPIES_PER_MATCH):
-            frames, swapped = row_frames(name, copy, match["blocks"])
-            labels = truth[frames]
-            expected = np.where(swapped & (labels != pm.D), 1 - labels, labels)
-            path = os.path.join(WORK_DIR, "train_{}_{}.npz".format(name, copy))
-            with np.load(path) as saved:
-                if not np.array_equal(expected, saved["y"]):
-                    raise RuntimeError("{} does not hold the rows this code expects: delete it and "
-                                       "run 'features' again".format(path))
-            out.append(near[frames])
-    return np.concatenate(out)
-
+# Stage 2: cv --------------------------------------------------------------------------------------
 
 def check_points(booster, name, seed):
-    """Log-probabilities for the whole of one match under the default damage, plus the truth."""
+    """The first model's log-probabilities for the whole of one match, damaged with this seed under
+    the default damage. 0 outside the halves."""
     match = other.load_match(STEMS[name], other.DATA_DIR)
     broken = other.damage(match, seed)
     ball, xy, speed, team = as_arrays(broken)
@@ -356,91 +294,14 @@ def check_points(booster, name, seed):
     for _, first, last in match["blocks"]:
         stop = last + 1
         points[first:stop] = model.predict_points(booster, ball[first:stop], xy[first:stop],
-                                                  speed[first:stop], team[first:stop], match["pitch"])
-    return points, match, broken
-
-
-def second_points(second_booster, points, blocks, first_costs):
-    """The second look's log-probabilities for a whole match, half by half, and 0 outside the
-    halves, as the first model's."""
-    out = np.zeros((len(points), 3), dtype=np.float32)
-    for _, first, last in blocks:
-        out[first:last + 1] = model.second_look(second_booster, points[first:last + 1], first_costs)
-    return out
-
-
-def second_rows(item, first_costs, offset):
-    """(X, y, names): the second look's training rows from one item of load_checks, every
-    EVERY_NTH_FRAME graded frame from offset, as it is and with the teams swapped."""
-    frames, direct, swapped, names = [], [], [], None
-    for _, first, last in item["blocks"]:
-        half = item["points"][first:last + 1]
-        features, names = model.second_features(half, first_costs)
-        direct.append(features)
-        swapped.append(model.second_features(half[:, model.SWAP], first_costs)[0])
-        frames.append(np.arange(first, last + 1))
-    frames, direct, swapped = (np.concatenate(part) for part in (frames, direct, swapped))
-    truth = item["truths"][LEVELS.index(TOUCH_S)][frames]
-    keep = np.zeros(len(frames), dtype=bool)
-    keep[offset::EVERY_NTH_FRAME] = True
-    keep &= truth != pm.X
-    labels = truth[keep]
-    return (np.concatenate([direct[keep], swapped[keep]]),
-            np.concatenate([labels, np.where(labels == pm.D, pm.D, 1 - labels)]), names)
-
-
-def stack(rows, picked, part):
-    """One part of rows from second_rows, 0 the features and 1 the labels, for the items picked."""
-    return np.concatenate([row[part] for row, pick in zip(rows, picked) if pick])
-
-
-def check_change(change_booster, name, seed):
-    """The change model's chance for the whole of one match under the default damage."""
-    match = other.load_match(STEMS[name], other.DATA_DIR)
-    ball, xy, speed, team = as_arrays(other.damage(match, seed))
-    chance = np.zeros(len(ball), dtype=np.float32)
-    for _, first, last in match["blocks"]:
-        stop = last + 1
-        direct, swapped = model.team_features(ball[first:stop], xy[first:stop], speed[first:stop],
-                                              team[first:stop], match["pitch"])
-        chance[first:stop] = model.change_from(change_booster, direct, swapped)
-    return chance
-
-
-def stage_cv_change():
-    """The change model without each training match in turn, keeping its chances for the one left
-    out. The first model's predictions come from 'cv' without --change."""
-    import lightgbm
-    results = []
-    for left_out in TRAIN:
-        start = time.time()
-        train_names = [name for name in TRAIN if name != left_out]
-        X, _, names = load_rows(train_names)
-        X_valid, _, _ = load_rows([left_out])
-        near, near_valid = change_targets(train_names), change_targets([left_out])
-        train = lightgbm.Dataset(X, near, feature_name=names, free_raw_data=True)
-        valid = lightgbm.Dataset(X_valid, near_valid, reference=train, free_raw_data=True)
-        booster = lightgbm.train(CHANGE_LIGHTGBM, train, num_boost_round=MOST_ROUNDS,
-                                 valid_sets=[valid],
-                                 callbacks=[lightgbm.early_stopping(PATIENCE, verbose=False),
-                                            lightgbm.log_evaluation(LOG_EVERY)])
-        results.append(booster.best_iteration)
-        print("without {}: {} rows, {:.1%} near a change, best round {}, log loss {:.4f} "
-              "({:.0f} s)".format(left_out, len(near), float(near.mean()), booster.best_iteration,
-                                  booster.best_score["valid_0"]["binary_logloss"],
-                                  time.time() - start), flush=True)
-        for seed in CHECK_SEEDS:
-            np.save(os.path.join(WORK_DIR, "oofc_{}_{}.npy".format(left_out, seed)),
-                    check_change(booster, left_out, seed))
-    with open(os.path.join(WORK_DIR, "rounds_change.json"), "w") as handle:
-        json.dump(results, handle)
-    print("best rounds:", results)
+                                                  speed[first:stop], team[first:stop],
+                                                  match["pitch"])
+    return points
 
 
 def stage_cv():
-    """Train without each training match in turn, and keep the predictions for the one left out."""
-    if CHANGE:
-        return stage_cv_change()
+    """Stage 2: train the first model without each training match in turn, and save its answers for
+    the match left out (out-of-fold). Every later choice is made on those answers."""
     import lightgbm
     results = []
     for left_out in TRAIN:
@@ -450,29 +311,32 @@ def stage_cv():
         X_valid, y_valid, _ = load_rows([left_out])
         train = lightgbm.Dataset(X, y, feature_name=names, free_raw_data=True)
         valid = lightgbm.Dataset(X_valid, y_valid, reference=train, free_raw_data=True)
+        # Add trees while the match left out still improves (early stopping).
         booster = lightgbm.train(LIGHTGBM, train, num_boost_round=MOST_ROUNDS, valid_sets=[valid],
                                  callbacks=[lightgbm.early_stopping(PATIENCE, verbose=False),
                                             lightgbm.log_evaluation(LOG_EVERY)])
         results.append(booster.best_iteration)
         print("without {}: {} rows, best round {}, log loss {:.4f} ({:.0f} s)".format(
-            left_out, len(y), booster.best_iteration, booster.best_score["valid_0"]["multi_logloss"],
-            time.time() - start), flush=True)
+            left_out, len(y), booster.best_iteration,
+            booster.best_score["valid_0"]["multi_logloss"], time.time() - start), flush=True)
         for seed in CHECK_SEEDS:
-            points, _, _ = check_points(booster, left_out, seed)
-            np.save(os.path.join(WORK_DIR, "oof_{}_{}.npy".format(left_out, seed)), points)
+            np.save(os.path.join(WORK_DIR, "oof_{}_{}.npy".format(left_out, seed)),
+                    check_points(booster, left_out, seed))
     with open(os.path.join(WORK_DIR, "rounds.json"), "w") as handle:
         json.dump(results, handle)
     print("best rounds:", results)
 
 
+# Stage 3: costs -----------------------------------------------------------------------------------
+
 def score_levels(truths, runs, codes):
-    """spellF1 against each version of the truth."""
+    """spellF1 against each version of the truth (see LEVELS)."""
     return [pm.spell_scores(truth, codes, runs)["mean_f1"] for truth in truths]
 
 
 def load_checks(with_rules=True):
-    """The training matches under default damage, with their out-of-fold points and, with_rules,
-    what possession_v2 makes of them."""
+    """The training matches under the default damage (two copies each) with the first model's
+    out-of-fold answers, and with_rules, what possession_v2 makes of them, for comparison."""
     items = []
     for name in TRAIN:
         match = other.load_match(STEMS[name], other.DATA_DIR)
@@ -484,62 +348,49 @@ def load_checks(with_rules=True):
                     "points": np.load(os.path.join(WORK_DIR, "oof_{}_{}.npy".format(name, seed)))}
             if with_rules:
                 item["rules"] = other.run_method(possession_v2, other.damage(match, seed))
-            if CHANGE:
-                item["chance"] = np.load(os.path.join(WORK_DIR,
-                                                      "oofc_{}_{}.npy".format(name, seed)))
             items.append(item)
     return items
 
 
-def decode(points, blocks, costs, switches=None):
-    """Viterbi labels for every half, with switches as the cost of a change of team at each frame
-    if it is given."""
+def decode(points, blocks, costs):
+    """Viterbi labels for every half of a match, X outside the halves."""
     codes = np.full(len(points), pm.X, dtype=np.int8)
     for _, first, last in blocks:
         stop = last + 1
-        codes[first:stop] = model.best_labels(points[first:stop].astype(np.float64), costs,
-                                              None if switches is None else switches[first:stop])
+        codes[first:stop] = model.best_labels(points[first:stop].astype(np.float64), costs)
     return codes
+
+
+def scorer(items):
+    """evaluate(trial) for search_costs: (spellF1 on the labels as given, spellF1 on each of LEVELS,
+    possessions per match) for the items' points decoded with the trial's costs."""
+    def evaluate(trial):
+        costs = model.cost_table(trial["switch"], trial["stop"], trial["restart"])
+        rows, counts = [], []
+        for item in items:
+            codes = decode(item["points"], item["blocks"], costs)
+            rows.append(score_levels(item["truths"], item["runs"], codes))
+            counts.append(len(pm.possession_spells(codes, item["runs"])))
+        means = np.mean(rows, axis=0)
+        return float(means[0]), means, float(np.mean(counts))
+    return evaluate
 
 
 def break_tie(trials, best):
     """(overall, settings) of the trial within TIED_WITHIN of best that does best over all LEVELS.
 
-    trials holds (settings, score on the chosen labels, mean score over all of LEVELS)."""
+    trials holds (settings, score on the labels as given, mean score over all of LEVELS)."""
     tied = [(overall, settings) for settings, score, overall in trials
             if score >= best - TIED_WITHIN]
     return max(tied, key=lambda pair: pair[0])
 
 
-def scorer(items, rate=None):
-    """evaluate(trial) for search_costs: (spellF1 on the chosen labels, on each of LEVELS, and the
-    possessions per match) for the items' points decoded with the trial's costs, and with its slope
-    when it has one, rate being the change model's training average."""
-    choice = LEVELS.index(TOUCH_S)
-
-    def evaluate(trial):
-        costs = model.cost_table(trial["switch"], trial["stop"], trial["restart"])
-        rows, counts = [], []
-        for item in items:
-            switches = None
-            if "slope" in trial:
-                switches = model.switch_by_frame(item["chance"], {
-                    "switch_cost": trial["switch"], "change_slope": trial["slope"],
-                    "change_rate": rate})
-            codes = decode(item["points"], item["blocks"], costs, switches)
-            rows.append(score_levels(item["truths"], item["runs"], codes))
-            counts.append(len(pm.possession_spells(codes, item["runs"])))
-        means = np.mean(rows, axis=0)
-        if COST_LEVELS:  # choose on the mean over these versions of the labels instead
-            target = float(np.mean([means[LEVELS.index(level)] for level in COST_LEVELS]))
-            return target, means, float(np.mean(counts))
-        return float(means[choice]), means, float(np.mean(counts))
-    return evaluate
-
-
 def search_costs(evaluate, settings, search, columns):
-    """The settings that do best on the chosen labels, trying each of search's (name, values) in
-    turn from settings, near-ties settled by break_tie. Prints every trial."""
+    """The costs that do best on the labels as given, near-ties settled by break_tie.
+
+    A simple search: starting from settings, try every value of one cost while the others stay put,
+    keep the best, and go on to the next cost, in the order search lists them. Prints every
+    trial."""
     best = evaluate(settings)[0]
     print("{} | {}  {:>6} {:>5}".format(
         " ".join("{:>{}}".format(key, width) for key, width, _ in columns),
@@ -557,29 +408,6 @@ def search_costs(evaluate, settings, search, columns):
             if score > best:
                 best, settings = score, trial
         print("  best so far: {} -> {:.4f}".format(settings, best), flush=True)
-    if FINE_COSTS:
-        tried = {tuple(sorted(t.items())) for t, _, _ in trials}
-        for round_index in range(FINE_ROUNDS):
-            improved = False
-            for key in ("switch", "stop", "restart"):
-                for factor in FINE_FACTORS:
-                    trial = dict(settings, **{key: round(settings[key] * factor, 2)})
-                    signature = tuple(sorted(trial.items()))
-                    if signature in tried:
-                        continue
-                    tried.add(signature)
-                    score, means, count = evaluate(trial)
-                    print("{} | {}  {:>6.4f} {:>5.0f}  fine".format(
-                        " ".join("{:>{}.{}f}".format(trial[column], width, max(places, 2))
-                                 for column, width, places in columns),
-                        " ".join("{:>6.3f}".format(m) for m in means), score, count), flush=True)
-                    trials.append((trial, score, float(np.mean(means))))
-                    if score > best:
-                        best, settings, improved = score, trial, True
-            print("  fine round {}: {} -> {:.4f}".format(round_index + 1, settings, best),
-                  flush=True)
-            if not improved:
-                break
     overall, chosen = break_tie(trials, best)
     if chosen != settings:
         print("tied with the best (within {} of {:.4f}); best over all {} versions: {} -> "
@@ -588,35 +416,56 @@ def search_costs(evaluate, settings, search, columns):
 
 
 def stage_costs():
-    """Choose the Viterbi costs on predictions for matches the model did not train on."""
-    if CHANGE and not os.path.isfile(os.path.join(WORK_DIR, "rounds_change.json")):
-        print("no change model predictions in {}: run 'cv --change' first".format(WORK_DIR))
-        return
+    """Stage 3: choose the first model's Viterbi costs on its out-of-fold answers."""
     items = load_checks()
-    rate = float(np.mean(change_targets(TRAIN))) if CHANGE else None
     reference = np.mean([score_levels(i["truths"], i["runs"], i["rules"]) for i in items], axis=0)
     print("possession_v2, same matches and damage: {}".format(np.round(reference, 3).tolist()))
-
-    settings, search, columns = dict(START_COSTS), list(COST_SEARCH), list(COST_COLUMNS)
-    if CHANGE:
-        print("change model: {:.1%} of the training rows are near a change of team".format(rate))
-        settings["slope"] = 0.0
-        search = [("switch", SWITCH_COSTS), ("slope", SLOPES), ("stop", STOP_COSTS),
-                  ("restart", RESTART_COSTS), ("switch", SWITCH_COSTS), ("slope", SLOPES)]
-        columns.insert(1, ("slope", 6, 2))
-    settings = search_costs(scorer(items, rate), settings, search, columns)
+    settings = search_costs(scorer(items), dict(START_COSTS), COST_SEARCH, COST_COLUMNS)
     with open(costs_path(), "w") as handle:
         json.dump(settings, handle)
     print("chosen:", settings)
 
 
+# Stage 4: the second look -------------------------------------------------------------------------
+
+def second_points(second_booster, points, blocks, first_costs):
+    """The second look's log-probabilities for a whole match, half by half, and 0 outside the
+    halves, as the first model's."""
+    out = np.zeros((len(points), 3), dtype=np.float32)
+    for _, first, last in blocks:
+        out[first:last + 1] = model.second_look(second_booster, points[first:last + 1], first_costs)
+    return out
+
+
+def second_rows(item, first_costs, offset):
+    """(X, y, names): the second look's training rows from one item of load_checks: every
+    EVERY_NTH_FRAME-th graded frame from offset, as it is and with the teams swapped."""
+    frames, direct, swapped, names = [], [], [], None
+    for _, first, last in item["blocks"]:
+        half = item["points"][first:last + 1]
+        features, names = model.second_features(half, first_costs)
+        direct.append(features)
+        swapped.append(model.second_features(half[:, model.SWAP], first_costs)[0])
+        frames.append(np.arange(first, last + 1))
+    frames, direct, swapped = (np.concatenate(part) for part in (frames, direct, swapped))
+    truth = item["truths"][0][frames]  # the labels as given
+    keep = np.zeros(len(frames), dtype=bool)
+    keep[offset::EVERY_NTH_FRAME] = True
+    keep &= truth != pm.X
+    labels = truth[keep]
+    return (np.concatenate([direct[keep], swapped[keep]]),
+            np.concatenate([labels, np.where(labels == pm.D, pm.D, 1 - labels)]), names)
+
+
+def stack(rows, picked, part):
+    """One part of rows from second_rows, 0 the features and 1 the labels, for the items picked."""
+    return np.concatenate([row[part] for row, pick in zip(rows, picked) if pick])
+
+
 def stage_second():
-    """Train the second look without each training match in turn, on the first model's out-of-fold
-    answers, and choose its costs on its answers for the matches left out."""
+    """Stage 4: train the second look without each training match in turn, on the first model's
+    out-of-fold answers, and choose its own costs on its answers for the matches left out."""
     import lightgbm
-    if CHANGE:
-        print("the second look reads the first model alone: run 'second' without --change")
-        return
     with open(costs_path()) as handle:
         first_costs = json.load(handle)
     with open(os.path.join(WORK_DIR, "rounds.json")) as handle:
@@ -653,10 +502,6 @@ def stage_second():
             booster.best_iteration,
             booster.best_score["valid_0"]["multi_logloss"], time.time() - start), flush=True)
 
-    for look in looks:  # out-of-fold second-look points, for tuning anything after Viterbi
-        np.save(os.path.join(WORK_DIR, "oof2_{}_{}.npy".format(look["name"], look["seed"])),
-                look["points"])
-
     print("\ncosts for the second look:")
     chosen = search_costs(scorer(looks), dict(START_COSTS), COST_SEARCH, COST_COLUMNS)
     with open(second_path(), "w") as handle:
@@ -691,30 +536,12 @@ def show_second(items, first_costs, looks, second_costs):
                                                 for g in means[1] - means[0])))
 
 
-def final_change(X, names, folder, slope):
-    """Train the change model on the rows the first model trained on, and save it in folder.
-    Returns the settings that tell possession_model.py to use it."""
-    import lightgbm
-    with open(os.path.join(WORK_DIR, "rounds_change.json")) as handle:
-        rounds = int(round(np.mean(json.load(handle))))
-    near = change_targets(TRAIN)
-    start = time.time()
-    change_booster = lightgbm.train(CHANGE_LIGHTGBM, lightgbm.Dataset(X, near, feature_name=names),
-                                    num_boost_round=rounds)
-    path = os.path.join(folder, model.CHANGE_FILE)
-    change_booster.save_model(path)
-    print("change model: {} rounds in {:.0f} s, {:.1%} of rows near a change".format(
-        rounds, time.time() - start, float(near.mean())))
-    print("change model file: {} ({:.1f} MB)".format(path, os.path.getsize(path) / 1e6))
-    return {"change_model": model.CHANGE_FILE, "change_slope": slope,
-            "change_rate": float(near.mean()), "change_near": CHANGE_NEAR, "change_rounds": rounds}
-
+# Stage 5: final -----------------------------------------------------------------------------------
 
 def load_second(costs, cv_rounds):
     """What 'second' chose, or None if it has not been run here. If 'cv' or 'costs' ran again after
     it, its rounds and costs no longer fit the first model, so that is an error."""
-    flags = (" --all" if set(HELD_BACK) <= set(TRAIN) else "") + (
-        " --touch {:g}".format(TOUCH_S) if TOUCH_S else "")
+    flags = " --all" if set(HELD_BACK) <= set(TRAIN) else ""
     if not os.path.isfile(second_path()):
         print("no second look: run 'second{}' before 'final{}' to add one".format(flags, flags))
         return None
@@ -751,16 +578,16 @@ def final_second(folder, first_costs, second):
 
 
 def stage_final():
-    """Train on every training match and save the model and its settings: to models/ with --all, as
-    the model to submit, and otherwise beside the work files, for 'test'. The second look is trained
-    and saved beside them when 'second' has been run."""
+    """Stage 5: train the first model on every training match and save it with its settings: into
+    models/ with --all, as the model to submit, and otherwise beside the work files, for 'test'.
+    The second look is trained and saved beside it when 'second' has been run."""
     import lightgbm
     with open(os.path.join(WORK_DIR, "rounds.json")) as handle:
         cv_rounds = json.load(handle)
-    rounds = int(round(np.mean(cv_rounds)))
+    rounds = int(round(np.mean(cv_rounds)))  # the average best number of trees over the folds
     with open(costs_path()) as handle:
         costs = json.load(handle)
-    second = None if CHANGE else load_second(costs, cv_rounds)
+    second = load_second(costs, cv_rounds)
     to_submit = set(HELD_BACK) <= set(TRAIN)
     model_path, settings_path = ((model.MODEL_PATH, model.SETTINGS_PATH) if to_submit
                                  else trial_paths())
@@ -772,16 +599,13 @@ def stage_final():
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     booster.save_model(model_path)
     settings = {"switch_cost": costs["switch"], "stop_cost": costs["stop"],
-                "restart_cost": costs["restart"], "rounds": rounds, "touch_s": TOUCH_S,
-                "trained_on": list(TRAIN),
+                "restart_cost": costs["restart"], "rounds": rounds, "trained_on": list(TRAIN),
                 "held_back": [name for name in HELD_BACK if name not in TRAIN],
                 "copies_per_match": COPIES_PER_MATCH, "every_nth_frame": EVERY_NTH_FRAME,
                 "feature_names": names}
     print("trained {} rounds on {} rows in {:.0f} s".format(rounds, len(y), time.time() - start))
     print("model file: {} ({:.1f} MB)".format(model_path, os.path.getsize(model_path) / 1e6))
-    if CHANGE:
-        settings.update(final_change(X, names, os.path.dirname(settings_path), costs["slope"]))
-    elif second is not None:
+    if second is not None:
         settings.update(final_second(os.path.dirname(settings_path), costs, second))
     with open(settings_path, "w") as handle:
         json.dump(settings, handle, indent=2)
@@ -792,9 +616,12 @@ def stage_final():
         print("  {:<20} {:>5.1f}%".format(names[index], 100.0 * gains[index] / gains.sum()))
 
 
-def run_on(booster, change_booster, name, seed, damage_settings=None):
-    """(match, broken, points, chance) for one held-back match, chance being None without a change
-    model."""
+# Stage 6: test ------------------------------------------------------------------------------------
+
+def run_on(booster, name, seed, damage_settings=None):
+    """(match, broken, points) for one held-back match: the match, its damaged copy and the first
+    model's log-probabilities. damage_settings changes test_on_other_matches' damage for this copy
+    only, for the harder kinds of damage in 'test'."""
     match = other.load_match(STEMS[name], other.DATA_DIR)
     keep = {}
     for key, value in (damage_settings or {}).items():
@@ -807,46 +634,34 @@ def run_on(booster, change_booster, name, seed, damage_settings=None):
             setattr(other, key, value)
     ball, xy, speed, team = as_arrays(broken)
     points = np.zeros((len(ball), 3))
-    chance = None if change_booster is None else np.zeros(len(ball))
     for _, first, last in match["blocks"]:
         stop = last + 1
-        direct, swapped = model.team_features(ball[first:stop], xy[first:stop], speed[first:stop],
-                                              team[first:stop], match["pitch"])
-        points[first:stop] = model.points_from(booster, direct, swapped)
-        if chance is not None:
-            chance[first:stop] = model.change_from(change_booster, direct, swapped)
-    return match, broken, points, chance
+        points[first:stop] = model.predict_points(booster, ball[first:stop], xy[first:stop],
+                                                  speed[first:stop], team[first:stop],
+                                                  match["pitch"])
+    return match, broken, points
 
 
 def stage_test():
-    """Score on the held-back matches: the default damage, then damage outside the training mix."""
+    """Stage 6: score the trial model on the three held-back matches, under the default damage and
+    eight harder kinds, beside possession_v1 and possession_v2. These matches chose nothing, so
+    this is the honest score."""
     if set(HELD_BACK) <= set(TRAIN):
         print("nothing is held back with --all: run 'test' before it, without --all")
         return
     model_path, settings_path = trial_paths()
     if not os.path.isfile(model_path):
-        print("no model at {}: run 'final{}' first, without --all".format(
-            model_path, " --change" if CHANGE else ""))
+        print("no model at {}: run 'final' first, without --all".format(model_path))
         return
     booster, settings = model.load_model(model_path, settings_path)
-    change_booster = model.load_change_model(settings, settings_path)
     seen = sorted(set(settings["trained_on"]) & set(HELD_BACK))
     if seen:
         print("this model trained on {}, so it cannot be tested on them".format(", ".join(seen)))
         return
-    costs = model.cost_table(settings["switch_cost"], settings["stop_cost"], settings["restart_cost"])
+    costs = model.cost_table(settings["switch_cost"], settings["stop_cost"],
+                             settings["restart_cost"])
     print("model:", model_path)
     print("costs:", settings["switch_cost"], settings["stop_cost"], settings["restart_cost"])
-    one_cost = None
-    if change_booster is not None:
-        print("change model: slope {}, {:.1%} of training rows near a change".format(
-            settings["change_slope"], settings["change_rate"]))
-        if os.path.isfile(os.path.join(WORK_DIR, "costs.json")):
-            with open(os.path.join(WORK_DIR, "costs.json")) as handle:
-                plain = json.load(handle)
-            one_cost = model.cost_table(plain["switch"], plain["stop"], plain["restart"])
-            print("'model, one cost' is the same model without it, with the costs 'costs' chose:",
-                  plain["switch"], plain["stop"], plain["restart"])
     second_booster = model.load_second_model(settings, settings_path)
     if second_booster is not None:
         second_costs = model.cost_table(settings["second_costs"]["switch"],
@@ -856,8 +671,6 @@ def stage_test():
               "its own costs: {:g} {:g} {:g}".format(
                   settings["second_rounds"], settings["second_costs"]["switch"],
                   settings["second_costs"]["stop"], settings["second_costs"]["restart"]))
-    print("labels learned:", "spells under {:.0f} s handed back".format(TOUCH_S) if TOUCH_S
-          else "as given")
     scenarios = (("default damage", {}),
                  ("stoppage path started about a second off its true frame (leak check)",
                   {"DEAD_START_SHIFT_S": 1.0}),
@@ -874,12 +687,8 @@ def stage_test():
         rows, macro, counts, per_match = {}, {}, {}, {}
         for name in HELD_BACK:
             seed = other.SEED + other.MATCHES.index(STEMS[name])
-            match, broken, points, chance = run_on(booster, change_booster, name, seed,
-                                                   damage_settings)
-            switches = None if chance is None else model.switch_by_frame(chance, settings)
-            codes = {"model": decode(points, match["blocks"], costs, switches)}
-            if one_cost is not None:
-                codes["model, one cost"] = decode(points, match["blocks"], one_cost)
+            match, broken, points = run_on(booster, name, seed, damage_settings)
+            codes = {"model": decode(points, match["blocks"], costs)}
             if second_booster is not None:
                 codes["+ second look"] = decode(
                     second_points(second_booster, points, match["blocks"], costs),
@@ -912,20 +721,9 @@ if __name__ == '__main__':
     parser.add_argument("stage", choices=("features", "cv", "costs", "second", "final", "test"))
     parser.add_argument("--all", action="store_true",
                         help="all seven matches, for the model to submit (see the docstring)")
-    parser.add_argument("--touch", type=float, default=0.0, choices=LEVELS,
-                        help="learn labels with spells under this many seconds between two of the "
-                             "rival's handed back (see the docstring)")
-    parser.add_argument("--change", action="store_true",
-                        help="add the change model, so a change of team costs less where one is "
-                             "likely (cv, costs, final and test; see the docstring)")
     args = parser.parse_args()
     if args.all:
         TRAIN = TUNING + HELD_BACK
         WORK_DIR = WORK_DIR_ALL
-    CHANGE = args.change
-    TOUCH_S = args.touch
-    if TOUCH_S:
-        WORK_DIR += "_touch{:.0f}".format(TOUCH_S)
-    WORK_DIR += WORK_SUFFIX
     {"features": stage_features, "cv": stage_cv, "costs": stage_costs, "second": stage_second,
      "final": stage_final, "test": stage_test}[args.stage]()
